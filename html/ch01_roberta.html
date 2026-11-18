@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 章 · RoBERTa 复习 — LiLT 架构课</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch01_roberta.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+
+<div class="kicker">第 01 章</div>
+<h1>RoBERTa 复习</h1>
+<p class="lede">LiLT 的<span class="t">文本流</span>就是一个原封不动的 RoBERTa-base。这一章只看文本流，把 RoBERTa 的每一步手算一遍。读完你会看到，LiLT 对它一处都没改，只是在注意力分数上多加了一项。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch01_roberta.py"><code>code/ch01_roberta.py</code></a></span>
+  <span class="pill">运行 <code>python ch01_roberta.py</code></span>
+</div>
+
+<h2><span class="sec">§1</span>BPE 分词：一个词会被切成几个 subword</h2>
+<p>RoBERTa 用的是 byte-level BPE，词表 50265。常见词是一个 token，少见的词、编号、金额会被切成好几块：</p>
+<div class="out"><div class="out-head"><span>python ch01_roberta.py · §1</span><b>真实分词器 roberta-base</b></div><pre>        Invoice → ['ĠInv', 'oice']
+  INV-2024-0042 → ['ĠINV', '-', '20', '24', '-', '00', '42']
+      $1,250.00 → ['Ġ$', '1', ',', '250', '.', '00']
+        Toronto → ['ĠToronto']
+          Maple → ['ĠMaple']</pre></div>
+<ul>
+  <li><code>Ġ</code> 表示这个 subword 前面有空格，也就是一个新词的开头。</li>
+  <li>特殊 token：<code>&lt;s&gt;</code> = 0（句首，相当于 BERT 的 [CLS]），<code>&lt;pad&gt;</code> = 1，<code>&lt;/s&gt;</code> = 2（句尾，相当于 [SEP]）。</li>
+  <li>输入已经按词切好时（<code>is_split_into_words=True</code>），分词器必须开 <code>add_prefix_space=True</code>，否则每个词开头的 <code>Ġ</code> 不对。</li>
+</ul>
+<div class="callout key">
+  <span class="ct">这和 LiLT 有什么关系</span>
+  <p>一个词被切成几块，这几块都要拿到同一个框。像 <code>INV-2024-0042</code> 这样的编号会占 7 个 token，它们在 layout 流里的坐标完全相同。第 2 章讲怎么对齐。</p>
+</div>
+
+<h2><span class="sec">§2</span>position_ids：RoBERTa 从 2 开始数</h2>
+<p>这是 fairseq 留下的习惯。位置表的第 0、1 行和 <code>padding_idx = 1</code> 绑在一起，真正的位置从 2 开始，pad 的位置固定是 1。所以位置表是 514 行，等于 512 + 2。</p>
+<div class="math">position_ids = cumsum(<span class="mi">mask</span>) · <span class="mi">mask</span> + padding_idx</div>
+<div class="out"><div class="out-head"><span>python ch01_roberta.py · §2</span><b>真实分词器</b></div><pre>input_ids   : [[0, 5480, 30503, 35, 2], [0, 10566, 35, 2, 1]]
+position_ids: [[2, 3, 4, 5, 6], [2, 3, 4, 5, <span class="hl">1</span>]]</pre></div>
+<p>第二句比第一句短一个 token，最后补了一个 pad（id 1），它的 position 也是 1。这组 <code>position_ids</code> 只算一次，<span class="t">文本流</span>和 <span class="l">layout 流</span>共用，layout 流有自己的一张 1D 位置表（第 3 章）。</p>
+
+<h2><span class="sec">§3</span>文本 embedding = LayerNorm(词向量 + 位置向量 + token_type 向量)</h2>
+<div class="math"><span class="mi">E</span><sub>T</sub> = LN(<span class="mi">E</span><sub>token</sub> + <span class="mi">P</span><sub>1D</sub>)<span class="eq-no">论文式 (1)</span></div>
+<p>论文写的是两项相加。代码里还多加了一个 token_type 向量，但 RoBERTa 的 <code>type_vocab_size = 1</code>，所有位置加的都是同一个常数向量，不影响结论。</p>
+<pre class="code"><code>E = model.embeddings
+manual = E.word_embeddings(ids) + E.position_embeddings(pos) + E.token_type_embeddings(torch.zeros_like(ids))
+manual = E.LayerNorm(manual)</code></pre>
+<div class="out"><div class="out-head"><span>python ch01_roberta.py · §3</span><b>真实权重</b></div><pre>手算 1x66x768，和模型输出一致？ <span class="ok">True</span>
+注意：文本 embedding 里完全没有 bbox。坐标只进 layout 流。</pre></div>
+<div class="callout key">
+  <span class="ct">和 LayoutLM 的第一个区别</span>
+  <p>LayoutLM 把 2D 位置向量直接加到 768 维文本 embedding 上。LiLT 的文本 embedding 里一个坐标都没有，坐标只进 layout 流。正因为如此，文本流可以整个换掉（第 5 章）。</p>
+</div>
+
+<h2><span class="sec">§4</span>用 LiLT 的文本流权重拼出一个纯 RoBERTa</h2>
+<p>把 LiLT checkpoint 里所有非 layout 的参数，原样 load 进一个空的 <code>RobertaModel</code>：</p>
+<pre class="code"><code>roberta = RobertaModel(rcfg).eval()
+text_sd = {k: v for k, v in model.state_dict().items() if not is_layout_param(k)}
+missing, unexpected = roberta.load_state_dict(text_sd, strict=False)</code></pre>
+<div class="out"><div class="out-head"><span>python ch01_roberta.py · §4</span><b>真实权重</b></div><pre>缺失的参数: <span class="ok">[]</span>
+多出来的参数: <span class="ok">[]</span>
+→ 参数名一一对应：LiLT 的文本流就是 RoBERTa，一个参数都不多。</pre></div>
+<p>一个不缺，一个不多。这就是 LiLT 能“换文本模型”的前提：只要另一个模型也是 RoBERTa 结构、尺寸一样，它的权重就能直接填进文本流的位置。</p>
+
+<h2><span class="sec">§5</span>手算 RoBERTa 第 0 层（Post-LN）</h2>
+<p>RoBERTa 沿用 BERT 的 <strong>Post-LN</strong> 结构：先做残差相加，再 LayerNorm。一层分两个子块：</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 160" role="img" aria-label="Post-LN Transformer 层：注意力、残差、LN、FFN、残差、LN">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker>
+  </defs>
+  <text x="18" y="104" class="d-mono" font-size="14">x</text>
+  <path d="M32,100 H64" class="d-arrow" marker-end="url(#a1)"/>
+  <rect x="66" y="74" width="140" height="52" rx="8" class="d-t"/>
+  <text x="136" y="96" text-anchor="middle" class="d-text" font-size="14" font-weight="600">多头注意力</text>
+  <text x="136" y="114" text-anchor="middle" class="d-sub" font-size="12">12 头 × 64 维</text>
+  <path d="M206,100 H230" class="d-arrow" marker-end="url(#a1)"/>
+  <circle cx="246" cy="100" r="14" class="d-box"/><text x="246" y="105" text-anchor="middle" class="d-text" font-size="16">+</text>
+  <path d="M260,100 H280" class="d-arrow" marker-end="url(#a1)"/>
+  <rect x="282" y="82" width="44" height="36" rx="6" class="d-box"/><text x="304" y="105" text-anchor="middle" class="d-text" font-size="13">LN</text>
+  <path d="M326,100 H372" class="d-arrow" marker-end="url(#a1)"/>
+  <text x="340" y="92" class="d-mono" font-size="13">h₁</text>
+  <rect x="374" y="74" width="190" height="52" rx="8" class="d-t"/>
+  <text x="469" y="96" text-anchor="middle" class="d-text" font-size="14" font-weight="600">FFN</text>
+  <text x="469" y="114" text-anchor="middle" class="d-sub" font-size="12">768 → 3072（GELU）→ 768</text>
+  <path d="M564,100 H588" class="d-arrow" marker-end="url(#a1)"/>
+  <circle cx="604" cy="100" r="14" class="d-box"/><text x="604" y="105" text-anchor="middle" class="d-text" font-size="16">+</text>
+  <path d="M618,100 H638" class="d-arrow" marker-end="url(#a1)"/>
+  <rect x="640" y="82" width="44" height="36" rx="6" class="d-box"/><text x="662" y="105" text-anchor="middle" class="d-text" font-size="13">LN</text>
+  <path d="M684,100 H716" class="d-arrow" marker-end="url(#a1)"/>
+  <text x="722" y="104" class="d-mono" font-size="13">h₂</text>
+  <path d="M48,100 V36 H246 V84" class="d-line" marker-end="url(#a1)"/>
+  <text x="147" y="30" text-anchor="middle" class="d-muted" font-size="12">残差</text>
+  <path d="M350,100 V36 H604 V84" class="d-line" marker-end="url(#a1)"/>
+  <text x="477" y="30" text-anchor="middle" class="d-muted" font-size="12">残差</text>
+</svg>
+<figcaption>Post-LN：LayerNorm 在残差相加之后。LiLT 的两条流都是这个结构，第 4 章只在“多头注意力”里面改了一处。</figcaption>
+</figure>
+<div class="math">
+  <span class="mi">h</span><sub>1</sub> = LN(<span class="mi">x</span> + MHA(<span class="mi">x</span>))
+  <span class="mi">h</span><sub>2</sub> = LN(<span class="mi">h</span><sub>1</sub> + <span class="mi">W</span><sub>2</sub> GELU(<span class="mi">W</span><sub>1</sub><span class="mi">h</span><sub>1</sub>))
+</div>
+<div class="math">MHA 的每个头：softmax( <span class="mi">Q K</span><sup>⊤</sup> / √64 ) <span class="mi">V</span><span class="eq-no">论文式 (4)</span></div>
+<pre class="code"><code>q, k, v = heads(a.self.query(x)), heads(a.self.key(x)), heads(a.self.value(x))
+scores = q @ k.transpose(-1, -2) / math.sqrt(dh)   # [B,H,L,L]
+probs = scores.softmax(-1)
+ctx = (probs @ v).permute(0, 2, 1, 3).reshape(B, L, D)
+h1 = a.output.LayerNorm(a.output.dense(ctx) + x)                # ① attention + 残差 + LN
+ffn = layer.output.dense(layer.intermediate(h1))                 # ② 768→3072(GELU)→768
+h2 = layer.output.LayerNorm(ffn + h1)                            #    + 残差 + LN</code></pre>
+<div class="out"><div class="out-head"><span>python ch01_roberta.py · §5</span><b>真实权重</b></div><pre>Q/K/V      1x12x66x64   (batch, heads, seq, head_dim)
+scores     1x12x66x66
+层输出      1x66x768
+手算 == RobertaLayer 输出 ? <span class="ok">True</span></pre></div>
+<p>把 <code>scores</code> 这一行记住：<span class="chip">[1, 12, 66, 66]</span>，每个头一张 L × L 的分数表。第 4 章的 BiACM 就是在这张表上再加一张同样形状的 <span class="l">layout 分数表</span>。</p>
+
+<h2><span class="sec">§6</span>预告：同样的文本权重，加上 layout 流以后输出变了多少</h2>
+<p>§4 拼出来的纯 RoBERTa 和 LiLT 的文本流用的是<strong>同一套参数</strong>。把同一张发票分别喂进去，比较最后一层每个 token 的输出：</p>
+<div class="chart" id="chart-cos">
+  <p class="chart-title">纯 RoBERTa 与 LiLT 文本流，最后一层逐 token 余弦相似度</p>
+  <p class="chart-sub">示例发票的 66 个 token；越接近 1 表示 layout 流带来的改变越小。纵轴从 0.9 开始。</p>
+  <div class="plot"></div>
+</div>
+<div class="out"><div class="out-head"><span>python ch01_roberta.py · §6</span><b>真实权重</b></div><pre>纯 RoBERTa vs LiLT 文本流（最后一层）逐 token 余弦相似度：平均 <span class="hl">0.978</span>，最低 <span class="hl">0.913</span>
+两者用的是同一套文本权重，差别全部来自 BiACM 加进来的 layout 注意力分数（第 4 章）。</pre></div>
+<p>平均 0.978，说明 layout 流对文本表示是“微调”而不是“重写”。变化最大的是 <code>Ġchairs</code>（0.913）、<code>ĠAC</code>（ACME，0.929）、<code>Ġlamps</code>（0.945），都在商品行和抬头里。只看一张发票，不宜过度解读哪些 token 一定变得多；能确定的是，这些差别全部来自 layout 分数，因为两边的文本参数一模一样。</p>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>LiLT 的文本流和 RoBERTa-base 参数名一一对应，load 进去一个不缺、一个不多。</li>
+    <li>RoBERTa 的 position_ids 从 2 开始，pad 位置是 1，位置表 514 行；这组 position_ids 两条流共用。</li>
+    <li>文本 embedding 里没有任何坐标信息，坐标只进 layout 流。</li>
+    <li>每层的注意力分数是 <span class="chip">[B, 12, L, L]</span>，BiACM 就加在这里。</li>
+  </ol>
+</section>
+
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

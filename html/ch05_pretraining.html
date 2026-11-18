@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 5 章 · 预训练 — LiLT 架构课</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch05_pretraining.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+
+<div class="kicker">第 05 章</div>
+<h1>预训练</h1>
+<p class="lede">LiLT 的卖点是：<span class="l">layout 流</span>只在英文文档上预训练一次，就能接到别的语言的 RoBERTa 上用。这一章看它靠哪四件事做到：权重可拼接、DETACH 挡梯度、三个预训练任务、文本流学习率放慢 1000 倍。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch05_pretraining.py"><code>code/ch05_pretraining.py</code></a></span>
+  <span class="pill">运行 <code>python ch05_pretraining.py</code></span>
+</div>
+
+<div class="table-wrap"><table>
+  <caption style="text-align:left;padding:10px 12px 0;font-weight:600;font-size:14.5px">论文 3.1 节的预训练设置</caption>
+  <tbody>
+    <tr><th>数据</th><td>IIT-CDIP Test Collection 1.0：600 多万份文档、1100 多万张扫描页，用 TextIn API 做 OCR</td></tr>
+    <tr><th>文本流初始化</th><td>英文 RoBERTa-base</td></tr>
+    <tr><th>优化</th><td>Adam，学习率 2×10⁻⁵，weight decay 1×10⁻²，(β₁, β₂) = (0.9, 0.999)，前 10% 步线性 warmup，之后线性衰减</td></tr>
+    <tr><th>规模</th><td>batch 96，5 个 epoch，4 张 A40（48 GB）</td></tr>
+    <tr><th>公开的东西</th><td>微调代码和三个 checkpoint；<strong>预训练代码没有公开</strong>，本章的预训练细节来自论文，脚本里的是按论文写的演示</td></tr>
+  </tbody>
+</table></div>
+
+<h2><span class="sec">§1</span>一个 LiLT checkpoint = RoBERTa 权重 + lilt-only 权重</h2>
+<figure class="diagram">
+<svg viewBox="0 0 760 130" role="img" aria-label="RoBERTa 权重加上 lilt-only 权重拼成 LiLT checkpoint">
+  <defs><marker id="a5" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker></defs>
+  <rect x="10" y="22" width="250" height="86" rx="10" class="d-t"/>
+  <text x="135" y="50" text-anchor="middle" class="d-text" font-size="14" font-weight="600">任意 RoBERTa 结构的文本模型</text>
+  <text x="135" y="72" text-anchor="middle" class="d-sub" font-size="12">英文 roberta-base / InfoXLM / 中文 RoBERTa…</text>
+  <text x="135" y="94" text-anchor="middle" class="d-mono" font-size="11.5">键名 roberta.* → lilt.*</text>
+  <text x="290" y="72" text-anchor="middle" class="d-text" font-size="24">+</text>
+  <rect x="320" y="22" width="200" height="86" rx="10" class="d-l"/>
+  <text x="420" y="50" text-anchor="middle" class="d-text" font-size="14" font-weight="600">lilt-only-base</text>
+  <text x="420" y="72" text-anchor="middle" class="d-sub" font-size="12">layout 流全部参数</text>
+  <text x="420" y="94" text-anchor="middle" class="d-mono" font-size="11.5">21 MB</text>
+  <path d="M528,65 H582" class="d-arrow" marker-end="url(#a5)"/>
+  <rect x="586" y="22" width="164" height="86" rx="10" class="d-box"/>
+  <text x="668" y="50" text-anchor="middle" class="d-text" font-size="14" font-weight="600">LiLT checkpoint</text>
+  <text x="668" y="72" text-anchor="middle" class="d-sub" font-size="12">直接拿去微调</text>
+  <text x="668" y="94" text-anchor="middle" class="d-mono" font-size="11.5">en-base 293 MB</text>
+</svg>
+<figcaption>官方发布了三个 checkpoint：<code>lilt-roberta-en-base</code>（293 MB）、<code>lilt-infoxlm-base</code>（846 MB）和只有 layout 流的 <code>lilt-only-base</code>（21 MB）。</figcaption>
+</figure>
+<p>官方仓库的 <code>gen_weight_roberta_like.py</code> 就是一次字典合并：</p>
+<pre class="code"><code>config['channel_shrink_ratio'] = 4
+config['max_2d_position_embeddings'] = 1024
+text_model = torch.load(opt.text)
+text_model = {k.replace('roberta.', 'lilt.'): v for (k, v) in text_model.items()}
+lilt_model = torch.load(opt.lilt)
+total_model = {**text_model, **lilt_model}</code></pre>
+<p>脚本演示了这件事反过来也成立：把文本流整个换成另一套（这里用随机权重代替），layout 流的参数一个都不动。</p>
+<div class="out"><div class="out-head"><span>python ch05_pretraining.py · §1</span><b>真实权重</b></div><pre>  文本流参数张量 199 个，例如：
+     embeddings.word_embeddings.weight
+     embeddings.position_embeddings.weight
+     embeddings.token_type_embeddings.weight
+     encoder.layer.0.attention.self.query.weight
+  layout 流参数张量 201 个，例如：
+     layout_embeddings.x_position_embeddings.weight
+     encoder.layer.0.attention.self.layout_query.weight
+     encoder.layer.0.layout_intermediate.dense.weight
+
+  换掉文本流以后，layout 流参数一个没变？ <span class="ok">True</span></pre></div>
+<div class="callout warn">
+  <span class="ct">能换的前提</span>
+  <ul>
+    <li>层数、头数、最大长度要一样（12 层、12 头、512）。论文 3.1 节说，这保证了 BiACM 能正常工作：每层都有对应的分数表可以相加。</li>
+    <li>hidden 也得是 768。<code>gen_weight_roberta_like.py</code> 直接沿用文本模型的 config，layout 流的宽度按 <code>hidden_size // 4</code> 算出来；如果换成 hidden 1024 的 large 模型，layout 流就变成 256 维，21 MB 的 lilt-only 权重就装不进去了。</li>
+    <li>文本模型必须是 RoBERTa 结构（键名能从 <code>roberta.*</code> 改成 <code>lilt.*</code>）。</li>
+  </ul>
+</div>
+
+<h2><span class="sec">§2</span>DETACH：预训练时挡住 “layout 损失 → 文本流” 的梯度</h2>
+<div class="math">
+  <span class="ll"><span class="mi">α̃</span><sup>L</sup><sub>ij</sub></span> = <span class="mi">α</span><sup>L</sup><sub>ij</sub> + DETACH( <span class="mi">α</span><sup>T</sup><sub>ij</sub> )<span class="eq-no">论文式 (6)，预训练</span>
+</div>
+<p>前向数值不变（第 4 章 §2），变的是反向：layout 那一份分数里的 α<sup>T</sup> 被当成常数，layout 分支的损失不会通过它回传到文本流的 W<sub>Q</sub>、W<sub>K</sub>。脚本造了一个只依赖 layout 分支的损失，量一下文本流 W<sub>Q</sub> 收到多少梯度：</p>
+<pre class="code"><code>s_for_layout = sL + (sT.detach() if detach else sT)   # 论文公式 (6)
+p = s_for_layout.softmax(-1)
+layout_ctx = p @ sh(sa.layout_value(l), 16)
+loss = layout_ctx.pow(2).mean()                        # 随便一个只依赖 layout 分支的损失
+loss.backward()</code></pre>
+<div class="out"><div class="out-head"><span>python ch05_pretraining.py · §2</span><b>真实权重</b></div><pre>  detach=False  文本 W_Q 的梯度范数 2.17e-01   layout W_Q 的梯度范数 3.73e-01
+  detach=True   文本 W_Q 的梯度范数 <span class="ok">0.00e+00</span>   layout W_Q 的梯度范数 3.73e-01</pre></div>
+<p><strong>为什么要挡</strong>：论文的说法是，为了让 LiLT 尽可能和不同的现成文本模型配合，预训练时不能让非文本的梯度去改文本流，要保持文本流的整体一致性。换句话说，layout 流要学会适应一个“固定的 RoBERTa”，而不是和预训练时那个文本流互相迁就、绑在一起。<strong>微调时去掉 DETACH</strong>，两条流一起训。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>#（论文表 1a）</th><th>设置</th><th class="n">平均 F1</th></tr></thead>
+  <tbody>
+    <tr class="best"><td>3</td><td>预训练 DETACH，微调不 DETACH（默认）</td><td class="n">0.7963</td></tr>
+    <tr><td>4</td><td>预训练也不 DETACH</td><td class="n">0.7682</td></tr>
+    <tr><td>5</td><td>微调也 DETACH</td><td class="n">0.7822</td></tr>
+  </tbody>
+</table></div>
+
+<h2><span class="sec">§3</span>三个预训练任务的标签</h2>
+<h3>MVLM：遮词预测（Masked Visual-Language Modeling）</h3>
+<p>随机选 15% 的 token：其中 80% 换成 <code>&lt;mask&gt;</code>，10% 换成随机词，10% 不变。layout 信息保持不变。模型用输出特征在整个词表上预测原 token。和 BERT 的 MLM 一样，只是多了版面信息可以参考。</p>
+<div class="out"><div class="out-head"><span>python ch05_pretraining.py · §3 MVLM</span><b>随机抽样演示</b></div><pre>     Ġx         → 保持不变   目标：在整个词表上预测原 token
+     Ġlamps     → 随机词   目标：在整个词表上预测原 token
+     ĠAmount    → 保持不变   目标：在整个词表上预测原 token
+     Ġ2024      → &lt;mask&gt;   目标：在整个词表上预测原 token
+     ĠSUP       → 随机词   目标：在整个词表上预测原 token</pre></div>
+
+<h3>KPL：关键点定位（Key Point Location）</h3>
+<p>把整个页面（归一化后是 1000 × 1000 的正方形）等分成 7 × 7 = 49 个区域。随机选 15% 的框：80% 换成全零，10% 换成同 batch 里的随机框，10% 不变。模型要用三个独立的分类头，分别预测原框的<strong>左上角、右下角、中心点</strong>落在 49 个区域里的哪一个。</p>
+<div class="widget" id="w-kpl">
+  <div class="widget-title">点一个框，看它的三个关键点落在哪个区域</div>
+  <p class="widget-sub">蓝色是示例发票的 15 个 segment（归一化坐标，所以页面被压成了正方形，内容都在上半部分）。橙色格子是三个分类目标。</p>
+  <div class="two-col">
+    <div class="kpl-wrap"></div>
+    <p class="kpl-out" style="font-size:14px;margin:0"></p>
+  </div>
+</div>
+<pre class="code"><code>def region(x, y, n=7):
+    col = min(n - 1, x * n // 1001)
+    row = min(n - 1, y * n // 1001)
+    return row * n + col</code></pre>
+<div class="out"><div class="out-head"><span>python ch05_pretraining.py · §3 KPL</span><b>随机抽样演示</b></div><pre>     ĠBill      框 [70, 181, 164, 200] → 左上  7  右下  8  中心  7
+     Ġ42        框 [70, 227, 352, 245] → 左上  7  右下  9  中心  8
+     VO         框 [729, 45, 929, 81] → 左上  5  右下  6  中心  5
+     -          框 [211, 127, 388, 145] → 左上  1  右下  9  中心  2</pre></div>
+<p><strong>为什么预测区域而不是精确坐标</strong>：OCR 的框本来就有误差，要求精确回归反而在惩罚噪声。改成 49 类分类放宽了标准，论文说这样效果更好。</p>
+
+<h3>CAI：跨模态对齐识别（Cross-modal Alignment Identification）</h3>
+<p>收集被 MVLM 和 KPL 处理过的 token-box 对，再加一个二分类头判断：这一对还对得上吗？被换成随机词或随机框的标 0（没对齐），保持原样的标 1（对齐）。这逼模型去学“这个词应该出现在这个位置吗”，也就是跨模态的一致性。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>#（论文表 1b）</th><th>预训练任务</th><th class="n">平均 F1</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>MVLM</td><td class="n">0.7616</td></tr>
+    <tr><td>2</td><td>MVLM + KPL</td><td class="n">0.7748</td></tr>
+    <tr><td>3</td><td>MVLM + CAI</td><td class="n">0.7809</td></tr>
+    <tr class="best"><td>4</td><td>MVLM + KPL + CAI</td><td class="n">0.7963</td></tr>
+  </tbody>
+</table></div>
+<p>两个新任务都有用，CAI 的提升比 KPL 大，三个一起最好。</p>
+
+<h2><span class="sec">§4</span>文本流学习率放慢 1000 倍</h2>
+<p>如果所有参数用同一个学习率，预训练时文本流也在变，layout 流就会一直追着这个“变化中的文本流”去耦合，换一个文本模型就不灵了。论文的做法是把文本流的学习率大幅调低（论文 2.3 节）：</p>
+<pre class="code"><code>base_lr = 2e-5
+text_params   = [p for n, p in model.named_parameters() if not is_layout_param(n)]
+layout_params = [p for n, p in model.named_parameters() if is_layout_param(n)]
+optim = torch.optim.AdamW([
+    {"params": layout_params, "lr": base_lr},
+    {"params": text_params,   "lr": base_lr / 1000},
+], weight_decay=1e-2)</code></pre>
+<div class="table-wrap"><table>
+  <thead><tr><th>#（论文表 1c）</th><th>文本流学习率放慢倍数</th><th class="n">平均 F1</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>1（不放慢，统一学习率）</td><td class="n">0.7840</td></tr>
+    <tr><td>2</td><td>500</td><td class="n">0.7901</td></tr>
+    <tr><td>3</td><td>800</td><td class="n">0.7947</td></tr>
+    <tr class="best"><td>4</td><td>1000</td><td class="n">0.7963</td></tr>
+    <tr><td>5</td><td>1200</td><td class="n">0.7935</td></tr>
+    <tr><td>6</td><td>∞（完全冻结文本流）</td><td class="n">0.7893</td></tr>
+  </tbody>
+</table></div>
+<p>有意思的是完全冻结（#6）不是最好的：文本流稍微动一点，比一点不动更好。微调阶段则回到统一学习率，DETACH 也去掉。</p>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>LiLT checkpoint = 改了键名的 RoBERTa 权重 + 21 MB 的 lilt-only 权重；换文本模型要求层数、头数、长度、hidden 都对齐。</li>
+    <li>DETACH 不改前向数值，只让 layout 分支的梯度不回流文本流；只在预训练用。</li>
+    <li>三个任务：MVLM 学文本，KPL 学“东西在哪”（49 区域分类），CAI 学“文字和位置对不对得上”。</li>
+    <li>预训练时文本流学习率放慢 1000 倍，比统一学习率和完全冻结都好。</li>
+  </ol>
+</section>
+
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

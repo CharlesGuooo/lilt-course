@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 3 章 · Layout embedding — LiLT 架构课</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch03_layout_embedding.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+
+<div class="kicker">第 03 章</div>
+<h1>Layout embedding</h1>
+<p class="lede">一个框 (x0, y0, x1, y1) 怎么变成一个 192 维向量：查 6 次表、拼成 768 维、线性投影到 192 维，再加上 layout 流自己的 1D 位置向量。这是 <span class="l">layout 流</span>的入口，也是 LiLT 和 LayoutLM 第一个分岔的地方。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch03_layout_embedding.py"><code>code/ch03_layout_embedding.py</code></a></span>
+  <span class="pill">运行 <code>python ch03_layout_embedding.py</code></span>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 290" role="img" aria-label="layout embedding：框经过 6 次查表、拼接、线性投影，加 1D 位置后 LayerNorm">
+  <defs>
+    <marker id="a3" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker>
+    <marker id="a3l" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah-l"/></marker>
+  </defs>
+  <rect x="8" y="122" width="132" height="46" rx="8" class="d-box"/>
+  <text x="74" y="142" text-anchor="middle" class="d-text" font-size="13" font-weight="600">bbox</text>
+  <text x="74" y="159" text-anchor="middle" class="d-mono" font-size="11.5">x0, y0, x1, y1</text>
+  <g font-size="12">
+    <rect x="196" y="16" width="140" height="34" rx="6" class="d-l"/><text x="266" y="38" text-anchor="middle" class="d-mono">x 表[x0] → 128</text>
+    <rect x="196" y="58" width="140" height="34" rx="6" class="d-l"/><text x="266" y="80" text-anchor="middle" class="d-mono">y 表[y0] → 128</text>
+    <rect x="196" y="100" width="140" height="34" rx="6" class="d-l"/><text x="266" y="122" text-anchor="middle" class="d-mono">x 表[x1] → 128</text>
+    <rect x="196" y="142" width="140" height="34" rx="6" class="d-l"/><text x="266" y="164" text-anchor="middle" class="d-mono">y 表[y1] → 128</text>
+    <rect x="196" y="184" width="140" height="34" rx="6" class="d-l"/><text x="266" y="206" text-anchor="middle" class="d-mono">h 表[y1−y0] → 128</text>
+    <rect x="196" y="226" width="140" height="34" rx="6" class="d-l"/><text x="266" y="248" text-anchor="middle" class="d-mono">w 表[x1−x0] → 128</text>
+  </g>
+  <path d="M140,145 C168,145 168,33 194,33" class="d-line" marker-end="url(#a3)"/>
+  <path d="M140,145 C168,145 168,75 194,75" class="d-line" marker-end="url(#a3)"/>
+  <path d="M140,145 C168,145 168,117 194,117" class="d-line" marker-end="url(#a3)"/>
+  <path d="M140,145 C168,145 168,159 194,159" class="d-line" marker-end="url(#a3)"/>
+  <path d="M140,145 C168,145 168,201 194,201" class="d-line" marker-end="url(#a3)"/>
+  <path d="M140,145 C168,145 168,243 194,243" class="d-line" marker-end="url(#a3)"/>
+  <g class="d-line"><path d="M336,33 H368"/><path d="M336,75 H368"/><path d="M336,117 H368"/><path d="M336,159 H368"/><path d="M336,201 H368"/><path d="M336,243 H368"/></g>
+  <rect x="368" y="16" width="26" height="244" rx="5" class="d-l"/>
+  <g class="d-line"><path d="M368,57 H394"/><path d="M368,99 H394"/><path d="M368,141 H394"/><path d="M368,183 H394"/><path d="M368,225 H394"/></g>
+  <text x="381" y="280" text-anchor="middle" class="d-sub" font-size="12">拼接 768</text>
+  <path d="M394,140 H430" class="d-arrow-l" marker-end="url(#a3l)"/>
+  <rect x="432" y="116" width="108" height="48" rx="8" class="d-l"/>
+  <text x="486" y="137" text-anchor="middle" class="d-text" font-size="13" font-weight="600">Linear</text>
+  <text x="486" y="154" text-anchor="middle" class="d-mono" font-size="11.5">768 → 192</text>
+  <text x="486" y="184" text-anchor="middle" class="d-muted" font-size="11.5">P₂D · 式 (2)</text>
+  <path d="M540,140 H566" class="d-arrow-l" marker-end="url(#a3l)"/>
+  <circle cx="582" cy="140" r="14" class="d-box"/><text x="582" y="145" text-anchor="middle" class="d-text" font-size="16">+</text>
+  <rect x="530" y="214" width="104" height="44" rx="8" class="d-l"/>
+  <text x="582" y="233" text-anchor="middle" class="d-text" font-size="12.5">1D 位置表</text>
+  <text x="582" y="249" text-anchor="middle" class="d-mono" font-size="11">514 × 192</text>
+  <path d="M582,214 V158" class="d-arrow-l" marker-end="url(#a3l)"/>
+  <path d="M596,140 H614" class="d-arrow-l" marker-end="url(#a3l)"/>
+  <rect x="616" y="122" width="40" height="36" rx="6" class="d-box"/><text x="636" y="145" text-anchor="middle" class="d-text" font-size="13">LN</text>
+  <path d="M656,140 H680" class="d-arrow-l" marker-end="url(#a3l)"/>
+  <rect x="682" y="116" width="70" height="48" rx="8" class="d-l"/>
+  <text x="717" y="137" text-anchor="middle" class="d-text" font-size="14" font-weight="600">E_L</text>
+  <text x="717" y="154" text-anchor="middle" class="d-mono" font-size="11.5">192</text>
+  <text x="717" y="184" text-anchor="middle" class="d-muted" font-size="11.5">式 (3)</text>
+</svg>
+<figcaption>一个 token 的 layout embedding。四张坐标表各 1024 行 × 128 维，x0 和 x1 查同一张 x 表，y0 和 y1 查同一张 y 表，所以 6 次查表只用 4 张表。</figcaption>
+</figure>
+
+<h2><span class="sec">§1</span>四张坐标表，六次查表</h2>
+<div class="math"><span class="mi">P</span><sub>2D</sub> = Linear( CAT( <span class="mi">E</span><sub>x0</sub>, <span class="mi">E</span><sub>y0</sub>, <span class="mi">E</span><sub>x1</sub>, <span class="mi">E</span><sub>y1</sub>, <span class="mi">E</span><sub>h</sub>, <span class="mi">E</span><sub>w</sub> ) )<span class="eq-no">论文式 (2)</span></div>
+<p>每张表的宽度是 <code>hidden_size // 6 = 128</code>，6 段拼起来正好是 768，再用一个线性层压到 192。宽和高不是直接给的，是现算的：<code>h = y1 − y0</code>，<code>w = x1 − x0</code>。</p>
+
+<div class="widget" id="w-lookup">
+  <div class="widget-title">输入一个框，看它查了哪 6 行</div>
+  <p class="widget-sub">选示例发票里的一个 segment，或者直接改坐标（归一化后的 0..1000）。试试列表最后两个“坏框”。</p>
+  <div class="controls">
+    <label>预设 <select></select></label>
+    <label>x0 <input type="number" min="-200" max="2000"></label>
+    <label>y0 <input type="number" min="-200" max="2000"></label>
+    <label>x1 <input type="number" min="-200" max="2000"></label>
+    <label>y1 <input type="number" min="-200" max="2000"></label>
+  </div>
+  <div class="lookup-grid"></div>
+  <p class="lookup-msg" style="margin:12px 0 0;font-size:14px"></p>
+</div>
+
+<div class="callout diff">
+  <span class="ct">拼接顺序</span>
+  <p>论文式 (2) 写的顺序是 (x<sub>min</sub>, x<sub>max</sub>, y<sub>min</sub>, y<sub>max</sub>, width, height)，代码里实际拼的是 (x0, y0, x1, y1, h, w)。后面接的是一个学出来的线性层，顺序本身只是约定，但必须和权重训练时一致，所以以代码为准。</p>
+</div>
+<div class="out"><div class="out-head"><span>python ch03_layout_embedding.py · §1</span><b>真实权重</b></div><pre>  x_position_embeddings    1024x128   （1024 个坐标值，每个 768/6 = 128 维）
+  y_position_embeddings    1024x128   （1024 个坐标值，每个 768/6 = 128 维）
+  h_position_embeddings    1024x128   （1024 个坐标值，每个 768/6 = 128 维）
+  w_position_embeddings    1024x128   （1024 个坐标值，每个 768/6 = 128 维）
+  x0 和 x1 查同一张 x 表，y0 和 y1 查同一张 y 表；宽和高各有自己的表。</pre></div>
+
+<h2><span class="sec">§2</span>手算一遍，和模型输出对比</h2>
+<div class="math"><span class="mi">E</span><sub>L</sub> = LN( <span class="mi">P</span><sub>2D</sub> + <span class="mi">P</span><sub>1D</sub> )<span class="eq-no">论文式 (3)</span></div>
+<pre class="code"><code>parts = [
+    LE.x_position_embeddings(bbox[..., 0]),                       # 左 x0
+    LE.y_position_embeddings(bbox[..., 1]),                       # 上 y0
+    LE.x_position_embeddings(bbox[..., 2]),                       # 右 x1
+    LE.y_position_embeddings(bbox[..., 3]),                       # 下 y1
+    LE.h_position_embeddings(bbox[..., 3] - bbox[..., 1]),        # 高
+    LE.w_position_embeddings(bbox[..., 2] - bbox[..., 0]),        # 宽
+]
+cat = torch.cat(parts, dim=-1)                                    # [B, L, 768]
+p2d = LE.box_linear_embeddings(cat)                               # [B, L, 192]
+p1d = LE.box_position_embeddings(pos)                             # [B, L, 192]
+manual = LE.LayerNorm(p2d + p1d)</code></pre>
+<div class="out"><div class="out-head"><span>python ch03_layout_embedding.py · §2</span><b>真实权重</b></div><pre>  六段拼接            1x66x768
+  线性投影 768→192    1x66x192   ← 论文公式 (2) 的 P2D
+  + 1D 位置 embedding 1x66x192   ← layout 流自己的位置表，不是文本流那张
+  LayerNorm 后        1x66x192   ← 论文公式 (3) 的 EL
+  和模型输出一致？ <span class="ok">True</span></pre></div>
+<p><code>pos</code> 就是第 1 章 §2 那组从 2 开始的 position_ids，两条流共用；但查的是 <span class="l">layout 流自己的</span> 514 × 192 位置表，不是文本流那张 514 × 768 的。</p>
+
+<h2><span class="sec">§3</span>为什么还要再加 1D 位置</h2>
+<p>第 2 章说过，同一个 segment 里的词共用一个框。拿 “Invoice No:” 里的两个词来看：</p>
+<div class="out"><div class="out-head"><span>python ch03_layout_embedding.py · §3</span><b>真实权重</b></div><pre>  token 11 'ĠInv' 框 [70, 127, 200, 145]
+  token 13 'ĠNo' 框 [70, 127, 200, 145]
+  两者的 P2D 完全一样？ <span class="ok">True</span></pre></div>
+<p>Transformer 本身对顺序不敏感。如果 layout 流只有 P<sub>2D</sub>，这两个 token 在 layout 流里就无法区分。论文 2.1.2 节正是出于这个原因（“Transformer layers are permutation-invariant”）把 1D 位置又加了一次。</p>
+
+<h2><span class="sec">§4</span>学到的坐标表是不是“平滑”的</h2>
+<p>坐标表是普通的 <code>nn.Embedding</code>，第 300 行和第 301 行之间没有任何显式约束。坐标的“连续性”只能从预训练数据里学出来。用真实权重看一下第 300 行和其他每一行的余弦相似度：</p>
+<div class="chart" id="chart-coord">
+  <p class="chart-title">坐标表第 300 行与第 k 行的余弦相似度</p>
+  <p class="chart-sub">每隔 5 取一个 k；悬停看数值</p>
+  <div class="plot"></div>
+</div>
+<div class="out"><div class="out-head"><span>python ch03_layout_embedding.py · §4</span><b>真实权重</b></div><pre>  cos(x=300, x=300 ) = +1.000
+  cos(x=300, x=305 ) = +0.675
+  cos(x=300, x=320 ) = +0.603
+  cos(x=300, x=350 ) = +0.556
+  cos(x=300, x=400 ) = +0.491
+  cos(x=300, x=600 ) = <span class="hl">-0.319</span>
+  cos(x=300, x=900 ) = +0.041</pre></div>
+<p>能读出三件事：</p>
+<ol>
+  <li><strong>局部是平滑的，但窗口不对称</strong>：x 表在大约 260～400 之间相似度都在 0.46 以上，往左过了 250 就迅速掉到 0 附近（k = 220 时约为 0）。y 表的窗口更窄，大约只有 270～320。模型确实学到了“相邻坐标差不多”，只是这个“相邻”的范围各处不一样。</li>
+  <li><strong>相邻也不等于相同</strong>：300 和 305 的相似度只有 0.675，这张表不是正弦位置编码那样的光滑函数。</li>
+  <li><strong>远处不是单调衰减</strong>：x 表在 705 附近降到最低的 −0.54，在 745 到 750 之间突然从 −0.47 跳到 −0.15，之后一直在 0 附近；y 表的最低点在 910（−0.52）。这种突跳说明表里不同区段几乎是各学各的。坐标之间的远距离关系，主要还是靠后面 12 层注意力去处理。这里只看了一个参照点 300，换个参照点形状会不同，可以自己改脚本试。</li>
+</ol>
+
+<h2><span class="sec">§5</span>参数量</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>部件</th><th>形状</th><th class="n">参数</th></tr></thead>
+  <tbody>
+    <tr><td>4 张坐标表</td><td><code>4 × 1024 × 128</code></td><td class="n">524 K</td></tr>
+    <tr><td>1D 位置表</td><td><code>514 × 192</code></td><td class="n">99 K</td></tr>
+    <tr><td>线性投影</td><td><code>768 × 192 + 192</code></td><td class="n">148 K</td></tr>
+    <tr><td>LayerNorm</td><td><code>2 × 192</code></td><td class="n">0.4 K</td></tr>
+    <tr class="best"><td>合计</td><td></td><td class="n">771 K</td></tr>
+  </tbody>
+</table></div>
+<div class="callout key">
+  <span class="ct">和 LayoutLM 的对比</span>
+  <p>LayoutLM 把 2D 位置向量直接<strong>加到 768 维的文本 embedding 上</strong>，文本和坐标从第一层起就混在一起，只能一起预训练。LiLT 让坐标单独走一条 192 维的流，一点都不碰文本 embedding。代价是多了一条流，好处是文本流可以整个换掉（第 5 章）。</p>
+</div>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>layout embedding = LN( Linear( 6 次查表拼成的 768 维 ) + 1D 位置 )，输出 192 维。</li>
+    <li>4 张坐标表各 1024 行；x0/x1 共用 x 表，y0/y1 共用 y 表，宽高现算；任何索引超出 0..1023 都会报错。</li>
+    <li>同框的词 P<sub>2D</sub> 完全相同，所以 layout 流也必须加 1D 位置。</li>
+    <li>学到的坐标表局部平滑、远处不单调；连续性来自数据，不是结构保证的。</li>
+  </ol>
+</section>
+
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

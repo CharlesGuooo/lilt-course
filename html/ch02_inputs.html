@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 2 章 · 输入准备 — LiLT 架构课</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch02_inputs.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+
+<div class="kicker">第 02 章</div>
+<h1>输入准备</h1>
+<p class="lede">OCR 引擎给出的是“一块块文字 + 像素框”。这一章把它变成模型要的三个张量：<code>input_ids</code>、<code>bbox</code>、<code>attention_mask</code>。中间有三件事要处理：坐标归一化、框的粒度、subword 对齐。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch02_inputs.py"><code>code/ch02_inputs.py</code></a></span>
+  <span class="pill">运行 <code>python ch02_inputs.py</code></span>
+</div>
+
+<h2><span class="sec">§1</span>OCR 的原始输出：segment + 像素框</h2>
+<p>课程用的示例是 <code>common.py</code> 里手工构造的一张发票，页面 850 × 1100 像素。每个 <strong>segment</strong> 是 OCR 给出的一行或一块文字，带一个像素框 (x0, y0, x1, y1) 和一个 FUNSD 风格的标签（HEADER / QUESTION / ANSWER / OTHER）。</p>
+<div class="out"><div class="out-head"><span>python ch02_inputs.py · §1</span><b>示例数据</b></div><pre>  ACME SUPPLY CO.            (60, 50, 330, 85)      HEADER
+  INVOICE                    (620, 50, 790, 90)     HEADER
+  Invoice No:                (60, 140, 170, 160)    QUESTION
+  INV-2024-0042              (180, 140, 330, 160)   ANSWER
+  Date:                      (520, 140, 570, 160)   QUESTION
+  March 15, 2024             (580, 140, 720, 160)   ANSWER
+  ...（共 15 个 segment，页面 850x1100 像素）</pre></div>
+<p>完整的 15 个 segment 画在下面 §4 的交互图里。</p>
+
+<h2><span class="sec">§2</span>坐标归一化到 0..1000</h2>
+<p>不同扫描件的分辨率不一样，同一张发票扫成 300 dpi 和 72 dpi，像素坐标差好几倍。所以先把坐标换成“占页面宽高的千分比”，取整：</p>
+<div class="math"><span class="mi">x</span>′ = ⌊ 1000 · <span class="mi">x</span> / <span class="mi">W</span> ⌋　　<span class="mi">y</span>′ = ⌊ 1000 · <span class="mi">y</span> / <span class="mi">H</span> ⌋　　再截到 [0, 1000]</div>
+<div class="out"><div class="out-head"><span>python ch02_inputs.py · §2</span><b>示例数据</b></div><pre>  像素 (60, 140, 170, 160)  →  [70, 127, 200, 145]
+  像素 (660, 460, 760, 480)  →  [776, 418, 894, 436]</pre></div>
+<div class="callout warn">
+  <span class="ct">越界会直接报错</span>
+  <p>模型的坐标 embedding 表只有 1024 行（<code>max_2d_position_embeddings = 1024</code>）。忘了归一化、或者框超出页面导致坐标大于 1023，查表时就是 IndexError（在 GPU 上是 device-side assert）。官方的 <code>normalize_bbox</code> 没有截断；<code>common.py</code> 多加了 <code>min(1000, max(0, ·))</code>。第 3 章的交互图可以试一下坏框。</p>
+</div>
+
+<h2><span class="sec">§3</span>词级框 vs segment 级框</h2>
+<p>一个 segment 里通常有好几个词。给每个词什么框？有两种做法：</p>
+<div class="out"><div class="out-head"><span>python ch02_inputs.py · §3</span><b>示例数据</b></div><pre>  Invoice      segment框 [70, 127, 200, 145]   词框 [70, 127, 152, 145]
+  No:          segment框 [70, 127, 200, 145]   词框 [164, 127, 200, 145]
+  March        segment框 [682, 127, 847, 145]   词框 [682, 127, 741, 145]
+  15,          segment框 [682, 127, 847, 145]   词框 [752, 127, 788, 145]
+  2024         segment框 [682, 127, 847, 145]   词框 [800, 127, 847, 145]</pre></div>
+<p><strong>论文和官方 FUNSD 代码都用 segment 框</strong>：同一行里的所有词共享一个框。论文 2.1.2 节给的理由是，很多 OCR 引擎根本不给细粒度的词框。（示例里的“词框”是按字符数把 segment 框横向切开估出来的，只是演示。）</p>
+<p>代价是：同一个 segment 里的词，在 layout 流眼里坐标完全一样，只能靠 1D 位置区分先后。第 3 章 §3 会验证这一点。</p>
+
+<h2><span class="sec">§4</span>subword 对齐：每个 token 继承它所属词的框和标签</h2>
+<p>分词以后，一个词可能变成好几个 token。规则很简单：</p>
+<ul>
+  <li><strong>框</strong>：同一个词的所有 subword 都用这个词的框。</li>
+  <li><strong>标签</strong>：只给词的第一个 subword 打标签，其余 subword 标 <code>-100</code>，交叉熵会忽略它们。</li>
+  <li><strong>特殊 token</strong>：<code>&lt;s&gt;</code>、<code>&lt;/s&gt;</code> 的标签也是 <code>-100</code>，框见 §5。</li>
+</ul>
+
+<div class="widget" id="w-invoice">
+  <div class="widget-title">点一个 segment，看它变成了哪些 token</div>
+  <p class="widget-sub">画的是发票上半页（像素坐标）。点任意一块文字，下方列出它的像素框、归一化框，以及对应 token 的 bbox 和标签；也可以点最下面的 token。切到“词框”能看到按字符数估出来的词框（橙色虚线）。</p>
+  <div class="controls">
+    <span>框的粒度</span>
+    <div class="seg-btns"><button type="button" class="on" data-v="segment">segment 框（官方）</button><button type="button" data-v="word">词框</button></div>
+  </div>
+  <div class="doc-canvas"></div>
+  <div class="detail" style="margin-top:14px"></div>
+  <p class="widget-sub" style="margin:14px 0 6px">全部 66 个 token（灰色斜体是特殊 token）：</p>
+  <div class="tok-strip"></div>
+</div>
+
+<pre class="code"><code>for i, wid in enumerate(word_ids):
+    if wid is None:   # &lt;s&gt; / &lt;/s&gt;
+        bbox.append([0, 0, 0, 0])
+    else:
+        bbox.append(boxes_norm[wid])  # 同一个词的所有 subword 共用这个词的框</code></pre>
+<div class="out"><div class="out-head"><span>python ch02_inputs.py · §4（前 17 个 token）</span><b>真实分词器</b></div><pre>  idx  token        word_id  bbox                   label(只给首个 subword)
+    0  &lt;s&gt;             None  [0, 0, 0, 0]           -100（特殊 token，不算 loss）
+    1  ĠAC                0  [70, 45, 388, 77]      B-HEADER
+    2  ME                 0  [70, 45, 388, 77]      -100（非首个 subword）
+    3  ĠSUP               1  [70, 45, 388, 77]      I-HEADER
+    4  PL                 1  [70, 45, 388, 77]      -100（非首个 subword）
+    5  Y                  1  [70, 45, 388, 77]      -100（非首个 subword）
+    6  ĠCO                2  [70, 45, 388, 77]      I-HEADER
+    7  .                  2  [70, 45, 388, 77]      -100（非首个 subword）
+    8  ĠIN                3  [729, 45, 929, 81]     B-HEADER
+    9  VO                 3  [729, 45, 929, 81]     -100（非首个 subword）
+   10  ICE                3  [729, 45, 929, 81]     -100（非首个 subword）
+   11  ĠInv               4  [70, 127, 200, 145]    B-QUESTION
+   12  oice               4  [70, 127, 200, 145]    -100（非首个 subword）
+   13  ĠNo                5  [70, 127, 200, 145]    I-QUESTION
+   14  :                  5  [70, 127, 200, 145]    -100（非首个 subword）
+   15  ĠINV               6  [211, 127, 388, 145]   B-ANSWER
+   16  -                  6  [211, 127, 388, 145]   -100（非首个 subword）
+  ...</pre></div>
+<p>注意 <code>word_ids</code> 这一列：它不进模型，但推理完要靠它把 token 级的预测映射回词（第 6 章的 SER 解码）。</p>
+
+<h2><span class="sec">§5</span>特殊 token 的框：论文和代码不一样</h2>
+<div class="callout diff">
+  <span class="ct">&lt;/s&gt; 的框</span>
+  <p>论文 2.1.2 节写的是：[CLS] 用 (0,0,0,0,0,0)，[SEP] 用 (1000,1000,1000,1000,0,0)，[PAD] 用全 0（论文这里的 6 元组包括宽和高）。官方 FUNSD 微调代码 <code>run_funsd.py</code> 里，&lt;s&gt; 和 &lt;/s&gt; 都填 [0,0,0,0]。</p>
+</div>
+<div class="out"><div class="out-head"><span>python ch02_inputs.py · §5</span><b>示例数据</b></div><pre>  官方 FUNSD 代码          ：&lt;s&gt; [0, 0, 0, 0]   &lt;/s&gt; [0, 0, 0, 0]
+  论文 2.1.2 节写法        ：&lt;s&gt; [0, 0, 0, 0]   &lt;/s&gt; [1000, 1000, 1000, 1000]</pre></div>
+<p>预训练代码没有公开，所以没法确认预训练用的是哪种。实际做法是：<strong>微调和推理保持一致</strong>，用了哪种就一直用哪种。</p>
+
+<h2><span class="sec">§6</span>最终送进模型的张量</h2>
+<div class="out"><div class="out-head"><span>python ch02_inputs.py · §6</span><b>真实分词器</b></div><pre>  input_ids       1x66       torch.int64
+  bbox            1x66x4     torch.int64
+  attention_mask  1x66       torch.int64</pre></div>
+<ul>
+  <li><code>position_ids</code> 不用传。模型用 <code>input_ids</code> 自己算（第 1 章 §2），两条流共用。</li>
+  <li><code>word_ids</code> 不进模型，但要留着，推理后用它把 token 预测还原成词。</li>
+  <li>如果用支持 <code>boxes</code> 参数的分词器（<code>tokenizer(words, boxes=boxes)</code>），它内部做的就是 §4 这套对齐。</li>
+</ul>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>坐标先归一化到 0..1000 的整数，和页面分辨率无关；超过 1023 会越界报错。</li>
+    <li>官方做法用 segment 框：同一行的词共享一个框，行内先后只能靠 1D 位置区分。</li>
+    <li>subword 继承所属词的框；标签只给首个 subword，其余和特殊 token 标 -100。</li>
+    <li>&lt;/s&gt; 的框论文和代码不一致；微调和推理保持一致即可。</li>
+  </ol>
+</section>
+
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

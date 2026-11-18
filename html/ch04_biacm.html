@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 4 章 · 双流 encoder 与 BiACM — LiLT 架构课</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch04_biacm.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+
+<div class="kicker">第 04 章</div>
+<h1>双流 encoder 与 BiACM</h1>
+<p class="lede">两条流在每一层只交换一样东西：<strong>注意力分数</strong>。这一章手算一整层 LiLT，验证两条流共用同一张注意力图、各自聚合自己的 value，再用真实权重看 layout 分数到底改变了什么。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch04_biacm.py"><code>code/ch04_biacm.py</code></a></span>
+  <span class="pill">运行 <code>python ch04_biacm.py</code></span>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 420" role="img" aria-label="一层 LiLT：文本分数和 layout 分数相加，共用一个 softmax，各自乘自己的 V">
+  <defs>
+    <marker id="a4" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker>
+    <marker id="a4t" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah-t"/></marker>
+    <marker id="a4l" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah-l"/></marker>
+  </defs>
+  <!-- 输出 -->
+  <rect x="40" y="8" width="280" height="42" rx="8" class="d-t"/>
+  <text x="180" y="25" text-anchor="middle" class="d-text" font-size="12.5">输出投影 + 残差 + LN</text>
+  <text x="180" y="42" text-anchor="middle" class="d-mono" font-size="11.5">FFN 768 → 3072 → 768</text>
+  <rect x="440" y="8" width="280" height="42" rx="8" class="d-l"/>
+  <text x="580" y="25" text-anchor="middle" class="d-text" font-size="12.5">输出投影 + 残差 + LN</text>
+  <text x="580" y="42" text-anchor="middle" class="d-mono" font-size="11.5">FFN 192 → 768 → 192</text>
+  <!-- P·V -->
+  <rect x="40" y="76" width="160" height="34" rx="8" class="d-t"/>
+  <text x="120" y="98" text-anchor="middle" class="d-text" font-size="12.5">P · V_T → [L, 768]</text>
+  <rect x="560" y="76" width="160" height="34" rx="8" class="d-l"/>
+  <text x="640" y="98" text-anchor="middle" class="d-text" font-size="12.5">P · V_L → [L, 192]</text>
+  <path d="M120,76 V54" class="d-arrow-t" marker-end="url(#a4t)"/>
+  <path d="M640,76 V54" class="d-arrow-l" marker-end="url(#a4l)"/>
+  <!-- softmax -->
+  <rect x="316" y="122" width="128" height="40" rx="8" class="d-box"/>
+  <text x="380" y="139" text-anchor="middle" class="d-text" font-size="12.5" font-weight="600">mask + softmax</text>
+  <text x="380" y="155" text-anchor="middle" class="d-sub" font-size="11">得到 P [12, L, L]</text>
+  <path d="M316,142 H160 V114" class="d-arrow" marker-end="url(#a4)"/>
+  <path d="M444,142 H600 V114" class="d-arrow" marker-end="url(#a4)"/>
+  <text x="238" y="136" text-anchor="middle" class="d-muted" font-size="11.5">同一个 P</text>
+  <text x="522" y="136" text-anchor="middle" class="d-muted" font-size="11.5">同一个 P</text>
+  <!-- plus -->
+  <circle cx="380" cy="200" r="15" class="d-box"/>
+  <text x="380" y="206" text-anchor="middle" class="d-text" font-size="17">+</text>
+  <path d="M380,185 V166" class="d-arrow" marker-end="url(#a4)"/>
+  <text x="404" y="190" class="d-sub" font-size="11.5">相加：α_T + α_L</text>
+  <!-- scores -->
+  <rect x="140" y="236" width="180" height="40" rx="8" class="d-t"/>
+  <text x="230" y="253" text-anchor="middle" class="d-text" font-size="12.5">α_T = Q_T K_Tᵀ / √64</text>
+  <text x="230" y="269" text-anchor="middle" class="d-mono" font-size="11">[12, L, L]</text>
+  <rect x="440" y="236" width="180" height="40" rx="8" class="d-l"/>
+  <text x="530" y="253" text-anchor="middle" class="d-text" font-size="12.5">α_L = Q_L K_Lᵀ / √16</text>
+  <text x="530" y="269" text-anchor="middle" class="d-mono" font-size="11">[12, L, L]</text>
+  <path d="M230,236 V200 H361" class="d-arrow-t" marker-end="url(#a4t)"/>
+  <path d="M530,236 V200 H399" class="d-arrow-l" marker-end="url(#a4l)"/>
+  <text x="380" y="252" text-anchor="middle" class="d-text" font-size="13" font-weight="600">BiACM</text>
+  <text x="380" y="268" text-anchor="middle" class="d-muted" font-size="11">式 (5)(6)</text>
+  <!-- QKV -->
+  <rect x="40" y="306" width="80" height="34" rx="6" class="d-t"/><text x="80" y="328" text-anchor="middle" class="d-text" font-size="12.5">V_T</text>
+  <rect x="140" y="306" width="80" height="34" rx="6" class="d-t"/><text x="180" y="328" text-anchor="middle" class="d-text" font-size="12.5">Q_T</text>
+  <rect x="240" y="306" width="80" height="34" rx="6" class="d-t"/><text x="280" y="328" text-anchor="middle" class="d-text" font-size="12.5">K_T</text>
+  <rect x="440" y="306" width="80" height="34" rx="6" class="d-l"/><text x="480" y="328" text-anchor="middle" class="d-text" font-size="12.5">K_L</text>
+  <rect x="540" y="306" width="80" height="34" rx="6" class="d-l"/><text x="580" y="328" text-anchor="middle" class="d-text" font-size="12.5">Q_L</text>
+  <rect x="640" y="306" width="80" height="34" rx="6" class="d-l"/><text x="680" y="328" text-anchor="middle" class="d-text" font-size="12.5">V_L</text>
+  <path d="M180,306 V280" class="d-arrow-t" marker-end="url(#a4t)"/>
+  <path d="M280,306 V280" class="d-arrow-t" marker-end="url(#a4t)"/>
+  <path d="M480,306 V280" class="d-arrow-l" marker-end="url(#a4l)"/>
+  <path d="M580,306 V280" class="d-arrow-l" marker-end="url(#a4l)"/>
+  <path d="M80,306 V114" class="d-arrow-t" marker-end="url(#a4t)"/>
+  <path d="M680,306 V114" class="d-arrow-l" marker-end="url(#a4l)"/>
+  <!-- 输入 -->
+  <rect x="40" y="370" width="280" height="38" rx="8" class="d-t"/>
+  <text x="180" y="394" text-anchor="middle" class="d-text" font-size="13">文本隐状态 [L, 768]</text>
+  <rect x="440" y="370" width="280" height="38" rx="8" class="d-l"/>
+  <text x="580" y="394" text-anchor="middle" class="d-text" font-size="13">layout 隐状态 [L, 192]</text>
+  <path d="M80,370 V344" class="d-arrow-t" marker-end="url(#a4t)"/>
+  <path d="M180,370 V344" class="d-arrow-t" marker-end="url(#a4t)"/>
+  <path d="M280,370 V344" class="d-arrow-t" marker-end="url(#a4t)"/>
+  <path d="M480,370 V344" class="d-arrow-l" marker-end="url(#a4l)"/>
+  <path d="M580,370 V344" class="d-arrow-l" marker-end="url(#a4l)"/>
+  <path d="M680,370 V344" class="d-arrow-l" marker-end="url(#a4l)"/>
+</svg>
+<figcaption>一层 LiLT（微调和推理时的样子）。两条流各自算 Q、K、V，各自按自己的 head 维度缩放分数（÷8 和 ÷4），分数相加后过同一个 softmax，再各自乘自己的 V。之后的输出投影和 FFN 两条流各有一套，互不相通。</figcaption>
+</figure>
+
+<h2><span class="sec">§1</span>手算第 5 层，和模型实际输出对比</h2>
+<p>先看普通的单头注意力分数（论文式 4）：</p>
+<div class="math"><span class="mi">α</span><sub>ij</sub> = ( <span class="mi">x</span><sub>i</sub><span class="mi">W</span><sup>Q</sup> )( <span class="mi">x</span><sub>j</sub><span class="mi">W</span><sup>K</sup> )<sup>⊤</sup> / √<span class="mi">d</span><sup>h</sup><span class="eq-no">论文式 (4)</span></div>
+<p>两条流同一层、同一个头各算一个：<span class="t">α<sup>T</sup></span> 和 <span class="l">α<sup>L</sup></span>。BiACM 把它们相加，作为两条流共同的注意力分数：</p>
+<div class="math">
+  <span class="tt"><span class="mi">α̃</span><sup>T</sup><sub>ij</sub></span> = <span class="mi">α</span><sup>L</sup><sub>ij</sub> + <span class="mi">α</span><sup>T</sup><sub>ij</sub><span class="eq-no">论文式 (5)</span>
+</div>
+<div class="math">
+  <span class="ll"><span class="mi">α̃</span><sup>L</sup><sub>ij</sub></span> = <span class="mi">α</span><sup>L</sup><sub>ij</sub> + DETACH( <span class="mi">α</span><sup>T</sup><sub>ij</sub> )　预训练　｜　<span class="mi">α</span><sup>L</sup><sub>ij</sub> + <span class="mi">α</span><sup>T</sup><sub>ij</sub>　微调<span class="eq-no">论文式 (6)</span>
+</div>
+<p>DETACH 只出现在预训练，第 5 章细讲。下面按微调时的形式手写一整层：</p>
+<pre class="code"><code>def manual_layer(layer, t, l, use_layout_score=True, use_text_score=True):
+    sa = layer.attention.self
+    dT = sa.attention_head_size                       # 64
+    dL = dT // sa.channel_shrink_ratio                # 16
+    qT, kT, vT = split_heads(sa.query(t), dT), split_heads(sa.key(t), dT), split_heads(sa.value(t), dT)
+    qL, kL, vL = (split_heads(sa.layout_query(l), dL), split_heads(sa.layout_key(l), dL),
+                  split_heads(sa.layout_value(l), dL))
+    sT = qT @ kT.transpose(-1, -2) / math.sqrt(dT)    # 文本流的注意力分数 [B,12,L,L]
+    sL = qL @ kL.transpose(-1, -2) / math.sqrt(dL)    # layout 流的注意力分数 [B,12,L,L]
+    s = (sT if use_text_score else 0) + (sL if use_layout_score else 0)   # BiACM：两张分数相加
+    p = s.softmax(-1)                                 # 两条流用的是同一个 p
+    ctxT = merge_heads(p @ vT)                        # 用文本的 V 聚合 -> [B,L,768]
+    ctxL = merge_heads(p @ vL)                        # 用 layout 的 V 聚合 -> [B,L,192]
+    aT = layer.attention.output(ctxT, t)              # dense + 残差 + LN（文本）
+    aL = layer.attention.layout_output(ctxL, l)       # dense + 残差 + LN（layout，192 维的一套）
+    oT = layer.output(layer.intermediate(aT), aT)     # FFN 768→3072→768
+    oL = layer.layout_output(layer.layout_intermediate(aL), aL)   # FFN 192→768→192
+    return oT, oL, dict(qT=qT, qL=qL, sT=sT, sL=sL, p=p)</code></pre>
+<div class="out"><div class="out-head"><span>python ch04_biacm.py · §1</span><b>真实权重</b></div><pre>  文本 Q   1x12x66x64   layout Q 1x12x66x16
+  文本分数 1x12x66x66   layout 分数 1x12x66x66  ← 头数一样，所以能相加
+  文本输出 一致？ <span class="ok">True</span>
+  layout输出 一致？ <span class="ok">True</span></pre></div>
+<div class="callout key">
+  <span class="ct">两个容易忽略的细节</span>
+  <ul>
+    <li>两张分数<strong>先各自缩放再相加</strong>：文本除以 √64 = 8，layout 除以 √16 = 4。</li>
+    <li>交换的只有分数。V、输出投影、FFN、LayerNorm 两条流各有一套，layout 流的隐状态从头到尾都是 192 维，从来不会被 768 维的文本向量直接加进来。</li>
+  </ul>
+</div>
+
+<h2><span class="sec">§2</span>源码里的两个 softmax 其实是同一个</h2>
+<p>官方实现（<code>modeling_LiLTRobertaLike.py</code> 第 267～298 行，HF 版相同）里写了两份分数、两次 softmax：</p>
+<pre class="code"><code>tmp_attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+tmp_layout_attention_scores = layout_attention_scores / math.sqrt(self.attention_head_size//self.channel_shrink_ratio)
+attention_scores = tmp_attention_scores + tmp_layout_attention_scores
+layout_attention_scores = tmp_layout_attention_scores + tmp_attention_scores
+...
+layout_attention_probs = nn.Softmax(dim=-1)(layout_attention_scores)
+...
+attention_probs = nn.Softmax(dim=-1)(attention_scores)</code></pre>
+<div class="out"><div class="out-head"><span>python ch04_biacm.py · §2</span><b>真实权重</b></div><pre>  逐元素完全相等？ <span class="ok">True</span>
+  加法可交换，mask 也一样 → 推理时（无 dropout）两条流的注意力概率完全相同。</pre></div>
+<p>加法可交换，加的 mask 也一样，所以两份分数逐元素相等，两次 softmax 的结果也相同。准确地说：</p>
+<ul>
+  <li><strong>前向数值上永远相同</strong>，预训练时也一样，因为 DETACH 不改变数值，只改变反向传播。</li>
+  <li>训练时的区别有两处：两份概率各自过独立的 dropout；预训练时 DETACH 让 layout 那一份的梯度不回流到文本流。</li>
+  <li>部署推理时可以只算一次 softmax，每层省一个 <span class="chip">[B, 12, L, L]</span> 的 softmax 和缓冲区。</li>
+</ul>
+
+<h2><span class="sec">§3</span>每一层里，layout 分数占多大分量</h2>
+<p>用分数的标准差粗略衡量“这张分数表对 softmax 的影响有多大”，看 std(layout 分数) / std(文本分数)：</p>
+<div class="chart" id="chart-ratio">
+  <p class="chart-title">std(layout 分数) ÷ std(文本分数)，逐层</p>
+  <p class="chart-sub">示例发票，12 个头合在一起算；悬停看两个标准差</p>
+  <div class="plot"></div>
+</div>
+<p>浅层到中层（0～8 层）比值在 0.09～0.36 之间，注意力主要由文本决定；最后三层升到 0.54～0.73，版面的分量明显变大。这只是一张发票上的粗略指标，标准差大不等于对结果的贡献大，但趋势很清楚：<strong>越往上，版面说话的分量越重</strong>。</p>
+
+<h2><span class="sec">§4</span>一个具体的 token：有没有 layout 分数，它看向哪里</h2>
+<p>查询 token 选总金额 <code>$1,250.00</code> 的第一个 subword <code>Ġ$</code>。对比两种注意力：只用文本分数（相当于把 layout 分数拿掉），和 LiLT 实际用的文本 + layout 分数。12 个头取平均。</p>
+<div class="widget" id="w-attn">
+  <div class="widget-title">拖动滑块，逐层看 <code>Ġ$</code>（$1,250.00）的注意力</div>
+  <p class="widget-sub">列出两种情况下概率最高的 8 个 token。悬停看具体数值和变化量。</p>
+  <div class="controls">
+    <input type="range" min="0" max="11" step="1" value="5" aria-label="选择层">
+    <b class="layer-out"></b>
+  </div>
+  <div class="chart" style="border:0;padding:0;margin:0">
+    <div class="plot"></div>
+  </div>
+  <p class="attn-note" style="font-size:14px;margin:12px 0 0"></p>
+</div>
+<div class="out"><div class="out-head"><span>python ch04_biacm.py · §4（第 5 层）</span><b>真实权重</b></div><pre>  查询 token：'Ġ$'（$1,250.00）
+  只用文本分数   → &lt;s&gt;(0.16), &lt;/s&gt;(0.12), ĠAmount(0.07), Ġ$(0.06), 250(0.06)
+  文本 + layout → &lt;s&gt;(0.19), Ġ$(0.09), Ġ$(0.07), &lt;/s&gt;(0.07), ĠAmount(0.07)</pre></div>
+<p>脚本原本想看 layout 分数会不会把注意力拉向同一行左边的 “Total Amount:”。逐层看下来，答案是<strong>不会</strong>，至少在这张发票上不会：</p>
+<ul>
+  <li><strong>最稳定的效果是“同框相吸”</strong>：12 层里每一层，注意力都更多地落到和自己同框的那几个 subword 上（<code>$1,250.00</code> 这一块）。第 8 层从 0.048 涨到 0.190，第 9 层从 0.037 涨到 0.152。一个合理的解释（推测，未单独验证）：同框 token 进入 layout 流时只差一个 1D 位置，layout 表示很接近，Q<sub>L</sub>·K<sub>L</sub> 容易偏大。</li>
+  <li><strong>同一列的其他金额</strong>（$1,000.00、$250.00）在多数层有小幅上涨，比如第 6 层两者合计从 0.181 涨到 0.248。</li>
+  <li><strong>同一行左边的 “Total Amount:”</strong> 多数层反而略降。</li>
+</ul>
+<p>上面这段第 5 层的输出里，两个 <code>Ġ$</code> 分别是自己（0.09）和 <code>$1,000.00</code> 的 <code>Ġ$</code>（0.07），在组件里能分清。</p>
+
+<h2><span class="sec">§5</span>消融：把框打乱 / 把框清零，文本流最后一层变多少</h2>
+<p>文本和 token 完全不变，只改 bbox，看文本流最后一层输出和原来差多少（逐 token 余弦相似度取平均）：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>bbox</th><th class="n">与原始输出的平均余弦相似度</th></tr></thead>
+  <tbody>
+    <tr><td>原始框</td><td class="n">1.000</td></tr>
+    <tr><td>15 个 segment 的框随机打乱</td><td class="n">0.977</td></tr>
+    <tr><td>全部清零 [0, 0, 0, 0]</td><td class="n">0.939</td></tr>
+    <tr><td style="color:var(--muted)">参照：完全不要 layout 流（第 1 章 §6 的纯 RoBERTa）</td><td class="n" style="color:var(--muted)">0.978</td></tr>
+  </tbody>
+</table></div>
+<p>只改框，文本流的输出就变了，差别全部是通过 BiACM 的分数相加传进来的。一个值得注意的对比：<strong>框全部清零比完全不要 layout 流偏得更远</strong>（0.939 vs 0.978）。单个 token 的框是零，预训练时见过（第 5 章 KPL 会把一部分框换成零）；但整页所有框同时为零，模型没见过，layout 分数照样加进来，起的作用就不可预期了。注意这里量的是“离原输出多远”，不是任务效果。工程上的含义是：少量 token 缺框可以填零，整页拿不到框时不要指望 LiLT 自动退化成纯文本模型。</p>
+
+<h2><span class="sec">§6</span>论文的消融：为什么是“分数相加”</h2>
+<p>论文表 1(a) 在 FUNSD + XFUND（8 种语言）上比较了几种跨模态交互方式，指标是 SER 的平均 F1：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>#</th><th>两条流怎么交互</th><th class="n">平均 F1</th></tr></thead>
+  <tbody>
+    <tr><td>6</td><td>只用文本流（InfoXLM-base）</td><td class="n">0.7207</td></tr>
+    <tr><td>1</td><td>CAT：只在输出端拼接，中间不交互</td><td class="n">0.6751</td></tr>
+    <tr><td>2</td><td>CAT + Co-Attention（互相用对方的 K、V）</td><td class="n">0.6276</td></tr>
+    <tr class="best"><td>3</td><td>CAT + BiACM</td><td class="n">0.7963</td></tr>
+  </tbody>
+</table></div>
+<p>两个反直觉的点：只在输出端拼接（#1）还不如只用文本（#6）；交互更“深”的 Co-Attention（#2）更差。对 #2，论文的解释是这种深度交互破坏了文本流在预训练时的整体一致性。BiACM 只交换分数，不交换表示，文本流的 V、FFN 原封不动，这也是它能和现成文本模型配合的原因。</p>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>BiACM 每层只做一件事：两条流的注意力分数（各自缩放后）相加，共用一个 softmax，各自乘自己的 V。</li>
+    <li>源码里的两个 softmax 前向数值完全相同；部署时只算一次即可。</li>
+    <li>layout 分数的相对分量随层数加深而变大（0.13 → 0.73），在示例里最稳定的效果是“同框相吸”。</li>
+    <li>只改框就能改变文本流的输出；退化的框（全零）比没有 layout 流偏离更大。</li>
+  </ol>
+</section>
+
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

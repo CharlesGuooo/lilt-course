@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 0 章 · 全局鸟瞰 — LiLT 架构课</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch00_overview.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+
+<div class="kicker">第 00 章</div>
+<h1>全局鸟瞰</h1>
+<p class="lede">先不管细节，跑一次完整的前向：进去的是什么，出来的是什么，130 M 参数分别属于哪条流。后面每一章都是把这张图里的某一块放大来看。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch00_overview.py"><code>code/ch00_overview.py</code></a></span>
+  <span class="pill">运行 <code>python ch00_overview.py</code></span>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 500" role="img" aria-label="LiLT 整体结构：文本流与 layout 流并行，每层通过 BiACM 交换注意力分数">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker>
+    <marker id="aht" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah-t"/></marker>
+    <marker id="ahl" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah-l"/></marker>
+  </defs>
+  <rect x="250" y="12" width="300" height="46" rx="8" class="d-box"/>
+  <text x="400" y="32" text-anchor="middle" class="d-text" font-size="14" font-weight="600">任务头 · SER / RE（第 6 章）</text>
+  <text x="400" y="50" text-anchor="middle" class="d-sub" font-size="12">原版仓库：输入是拼接后的 960 维</text>
+  <rect x="300" y="88" width="200" height="32" rx="8" class="d-box"/>
+  <text x="400" y="109" text-anchor="middle" class="d-text" font-size="13">拼接 [1, L, 960]</text>
+  <path d="M400,88 V62" class="d-arrow" marker-end="url(#ah)"/>
+  <path d="M185,150 V104 H294" class="d-arrow-t" marker-end="url(#aht)"/>
+  <path d="M555,150 V104 H506" class="d-arrow-l" marker-end="url(#ahl)"/>
+  <text x="193" y="138" class="d-mono" font-size="12">[1, L, 768]</text>
+  <text x="563" y="138" class="d-mono" font-size="12">[1, L, 192]</text>
+  <text x="40" y="82" class="d-muted" font-size="12">HF 的 LiltModel</text>
+  <text x="40" y="98" class="d-muted" font-size="12">只返回这一路 →</text>
+  <rect x="52" y="154" width="290" height="120" rx="10" style="fill:var(--surface);stroke:var(--text);stroke-width:1.2;opacity:.55"/>
+  <rect x="46" y="160" width="290" height="120" rx="10" style="fill:var(--surface);stroke:var(--text);stroke-width:1.2;opacity:.8"/>
+  <rect x="40" y="166" width="290" height="120" rx="10" style="fill:var(--surface)"/>
+  <rect x="40" y="166" width="290" height="120" rx="10" class="d-t"/>
+  <text x="185" y="196" text-anchor="middle" class="d-text" font-size="15" font-weight="600">文本流 · Transformer 层 × 12</text>
+  <text x="185" y="218" text-anchor="middle" class="d-sub" font-size="13">= RoBERTa-base，原样不动（第 1 章）</text>
+  <text x="185" y="244" text-anchor="middle" class="d-mono" font-size="12">768 维 · 12 头 × 64 · FFN 3072</text>
+  <text x="185" y="266" text-anchor="middle" class="d-sub" font-size="12">124.06 M 参数</text>
+  <rect x="482" y="154" width="170" height="120" rx="10" style="fill:var(--surface);stroke:var(--layout);stroke-width:1.2;opacity:.55"/>
+  <rect x="476" y="160" width="170" height="120" rx="10" style="fill:var(--surface);stroke:var(--layout);stroke-width:1.2;opacity:.8"/>
+  <rect x="470" y="166" width="170" height="120" rx="10" style="fill:var(--surface)"/>
+  <rect x="470" y="166" width="170" height="120" rx="10" class="d-l"/>
+  <text x="555" y="196" text-anchor="middle" class="d-text" font-size="15" font-weight="600">layout 流 × 12</text>
+  <text x="555" y="218" text-anchor="middle" class="d-sub" font-size="13">LiLT 本体</text>
+  <text x="555" y="244" text-anchor="middle" class="d-mono" font-size="12">192 维 · 12 头 × 16</text>
+  <text x="555" y="266" text-anchor="middle" class="d-sub" font-size="12">FFN 768 · 共 6.11 M 参数</text>
+  <text x="406" y="190" text-anchor="middle" class="d-text" font-size="13" font-weight="600">BiACM（第 4 章）</text>
+  <path d="M348,206 H464" class="d-arrow-t" marker-end="url(#aht)"/>
+  <path d="M464,228 H348" class="d-arrow-l" marker-end="url(#ahl)"/>
+  <text x="406" y="252" text-anchor="middle" class="d-sub" font-size="12">两边注意力分数相加</text>
+  <text x="406" y="268" text-anchor="middle" class="d-sub" font-size="12">共用一张注意力图</text>
+  <rect x="40" y="312" width="290" height="48" rx="8" class="d-t"/>
+  <text x="185" y="332" text-anchor="middle" class="d-text" font-size="13.5">文本 embedding = 词向量 + 1D 位置</text>
+  <text x="185" y="350" text-anchor="middle" class="d-sub" font-size="12">[1, L, 768] · 第 1 章</text>
+  <rect x="470" y="312" width="170" height="48" rx="8" class="d-l"/>
+  <text x="555" y="332" text-anchor="middle" class="d-text" font-size="13.5">layout embedding</text>
+  <text x="555" y="350" text-anchor="middle" class="d-sub" font-size="12">[1, L, 192] · 第 3 章</text>
+  <path d="M185,312 V290" class="d-arrow-t" marker-end="url(#aht)"/>
+  <path d="M555,312 V290" class="d-arrow-l" marker-end="url(#ahl)"/>
+  <path d="M334,342 H466" class="d-dash" marker-end="url(#ah)"/>
+  <text x="400" y="334" text-anchor="middle" class="d-muted" font-size="11.5">position_ids 共用</text>
+  <rect x="105" y="392" width="160" height="32" rx="8" class="d-t"/>
+  <text x="185" y="413" text-anchor="middle" class="d-mono" font-size="12.5">input_ids [1, L]</text>
+  <rect x="475" y="392" width="160" height="32" rx="8" class="d-l"/>
+  <text x="555" y="413" text-anchor="middle" class="d-mono" font-size="12.5">bbox [1, L, 4]</text>
+  <text x="400" y="404" text-anchor="middle" class="d-muted" font-size="11.5">attention_mask</text>
+  <text x="400" y="419" text-anchor="middle" class="d-muted" font-size="11.5">两条流共用</text>
+  <path d="M185,392 V364" class="d-arrow-t" marker-end="url(#aht)"/>
+  <path d="M555,392 V364" class="d-arrow-l" marker-end="url(#ahl)"/>
+  <rect x="255" y="452" width="290" height="36" rx="8" class="d-box"/>
+  <text x="400" y="475" text-anchor="middle" class="d-text" font-size="13">OCR 词 + 框 → 分词、归一化（第 2 章）</text>
+  <path d="M255,470 H185 V428" class="d-arrow" marker-end="url(#ah)"/>
+  <path d="M545,470 H555 V428" class="d-arrow" marker-end="url(#ah)"/>
+</svg>
+<figcaption>整门课的地图。论文 2.1 节把它叫作“并行双流 Transformer”：layout 流和文本流结构相同，只是 hidden 和 FFN 都缩小了。</figcaption>
+</figure>
+
+<h2><span class="sec">§1</span>配置：两条流的尺寸</h2>
+<p>两条流的层数和头数完全一样，只有宽度不同：layout 流的 hidden 和 FFN 都是文本流的 1/4。这个 4 就是配置里的 <code>channel_shrink_ratio</code>。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th><span class="t">文本流</span></th><th><span class="l">layout 流</span></th></tr></thead>
+  <tbody>
+    <tr><td>输入</td><td>词 id（<code>input_ids</code>）</td><td>框坐标（<code>bbox</code>）</td></tr>
+    <tr><td>hidden</td><td class="n">768</td><td class="n">192</td></tr>
+    <tr><td>头数 × 每头维度</td><td class="n">12 × 64</td><td class="n">12 × 16</td></tr>
+    <tr><td>FFN 中间层</td><td class="n">3072</td><td class="n">768</td></tr>
+    <tr><td>层数</td><td class="n">12</td><td class="n">12</td></tr>
+    <tr><td>参数从哪来</td><td>RoBERTa-base，原样不动</td><td>LiLT 自己预训练</td></tr>
+  </tbody>
+</table></div>
+<div class="callout key">
+  <span class="ct">为什么头数必须一样，宽度却可以不一样</span>
+  <p>BiACM 要把两条流<strong>同一层、同一个头</strong>的注意力分数逐元素相加（第 4 章）。注意力分数的形状是 <span class="chip">[B, 12, L, L]</span>，只和头数、序列长度有关，和每个头多宽无关。所以只要头数和最大长度对齐，layout 流就可以做得很窄。</p>
+</div>
+<pre class="code"><code>d_t = cfg.hidden_size                              # 768
+d_l = cfg.hidden_size // cfg.channel_shrink_ratio  # 192
+print(f"文本流  hidden {d_t}  head_dim {d_t // cfg.num_attention_heads}  FFN {cfg.intermediate_size}")
+print(f"layout流 hidden {d_l}  head_dim {d_l // cfg.num_attention_heads}  FFN {cfg.intermediate_size // cfg.channel_shrink_ratio}")</code></pre>
+<div class="out"><div class="out-head"><span>python ch00_overview.py · §1</span><b>真实权重</b></div><pre>层数 12，头数 12，channel_shrink_ratio 4
+文本流  hidden  768  head_dim  64  FFN 3072
+layout流 hidden  192  head_dim  16  FFN 768</pre></div>
+
+<h2><span class="sec">§2</span>参数归属：哪些来自 RoBERTa，哪些是 LiLT 自己的</h2>
+<p>整个 checkpoint 一共约 130.8 M 参数。其中九成五是原封不动的 RoBERTa，LiLT 自己的只有 6.11 M，和论文 3.1 节写的 “6.1M” 一致。</p>
+<div class="stats">
+  <div class="stat"><div class="s-label"><span class="legend-inline" style="margin:0"><i style="background:var(--text)"></i>文本流（= RoBERTa-base）</span></div><div class="s-value">124.06 M</div><div class="s-note">其中词向量表 50265 × 768 就占 38.6 M</div></div>
+  <div class="stat"><div class="s-label"><span class="legend-inline" style="margin:0"><i style="background:var(--layout)"></i>layout 流（LiLT 本体）</span></div><div class="s-value">6.11 M</div><div class="s-note">论文：6.1 M</div></div>
+  <div class="stat"><div class="s-label"><span class="legend-inline" style="margin:0"><i style="background:var(--muted)"></i>pooler</span></div><div class="s-value">0.59 M</div><div class="s-note">取 &lt;s&gt; 过 dense + tanh；SER 用不到</div></div>
+</div>
+<div class="segbar" role="img" aria-label="参数占比：文本流 94.9%，layout 流 4.7%，pooler 0.5%">
+  <div style="flex:94.88;background:var(--text)">文本流 94.9%</div>
+  <div style="flex:4.67;background:var(--layout)"></div>
+  <div style="flex:0.45;background:var(--muted)"></div>
+</div>
+<p style="font-size:13.5px;color:var(--muted)">layout 流占 4.7%，pooler 占 0.5%，色块太窄放不下文字。</p>
+<p>怎么区分哪个参数属于哪条流？LiLT 自己加的参数名都带 <code>layout</code> 或 <code>box_</code>，或者是四张坐标表 <code>x/y/h/w_position_embeddings</code>。其余的参数名和 RoBERTa 一模一样，第 1 章会验证这一点。</p>
+<pre class="code"><code>def is_layout_param(name):
+    """LiLT 自己（layout 流）的参数名都带 layout_ 或 box_ 前缀；其余都是 RoBERTa 文本流"""
+    return ("layout" in name) or ("box_" in name) or (".x_position" in name) or (".y_position" in name) \
+        or (".h_position" in name) or (".w_position" in name)</code></pre>
+<div class="out"><div class="out-head"><span>python ch00_overview.py · §2</span><b>真实权重</b></div><pre>文本流（= RoBERTa-base）:  124.06 M
+layout 流（LiLT 本体）  :    6.11 M   ← 论文说 6.1M
+pooler                  :    0.59 M   （SER 用不到）</pre></div>
+
+<h2><span class="sec">§3</span>一次前向</h2>
+<p>示例发票（<code>common.py</code> 里的 <code>SAMPLE_DOC</code>）有 15 个 segment、32 个词，分词后加上 &lt;s&gt; 和 &lt;/s&gt; 一共 <strong>66 个 token</strong>，所以下面的 L = 66。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>张量</th><th>shape</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>input_ids</code></td><td><span class="chip t">1×66</span></td><td>BPE token id</td></tr>
+    <tr><td><code>bbox</code></td><td><span class="chip l">1×66×4</span></td><td>每个 token 的框，坐标已归一化到 0..1000</td></tr>
+    <tr><td><code>attention_mask</code></td><td><span class="chip">1×66</span></td><td>两条流共用</td></tr>
+    <tr><td>文本 embedding</td><td><span class="chip t">1×66×768</span></td><td>第 1 章</td></tr>
+    <tr><td>layout embedding</td><td><span class="chip l">1×66×192</span></td><td>第 3 章</td></tr>
+    <tr><td>第 12 层文本流输出</td><td><span class="chip t">1×66×768</span></td><td>= HF 的 <code>last_hidden_state</code></td></tr>
+    <tr><td>第 12 层 layout 流输出</td><td><span class="chip l">1×66×192</span></td><td>HF 不返回，要用 hook 取</td></tr>
+  </tbody>
+</table></div>
+<p>HF 的 <code>LiltModel</code> 只返回文本流。为了看到 layout 流每一层的输出，<code>common.py</code> 的 <code>run_with_taps()</code> 在两条流的每一层上挂了 forward hook：</p>
+<pre class="code"><code>for i, layer in enumerate(base.encoder.layer):
+    # layer.output / layer.layout_output 是 FFN + 残差 + LayerNorm 之后的输出，也就是这一层的最终输出
+    hooks.append(layer.output.register_forward_hook(
+        lambda _m, _i, out, i=i: taps["text"].__setitem__(i, out)))
+    hooks.append(layer.layout_output.register_forward_hook(
+        lambda _m, _i, out, i=i: taps["layout"].__setitem__(i, out)))</code></pre>
+<div class="out"><div class="out-head"><span>python ch00_overview.py · §3</span><b>真实权重</b></div><pre>输入 input_ids     1x66
+输入 bbox          1x66x4   坐标范围 0..1000
+输入 attention_mask 1x66
+
+文本 embedding     1x66x768
+layout embedding   1x66x192
+第 12 层文本流输出  1x66x768
+第 12 层 layout 输出 1x66x192
+HF 返回的 last_hidden_state 1x66x768
+last_hidden_state == 第 12 层文本流输出 ? <span class="ok">True</span>
+→ HF 的 LiltModel 只返回文本流；layout 流最后的 192 维输出被丢掉了（第 6、7 章细讲）。</pre></div>
+<div class="callout warn">
+  <span class="ct">记住这个差别，第 6、7 章要用</span>
+  <p>原版仓库的任务头吃的是两条流拼起来的 960 维（768 + 192），论文里的数字都来自这个结构。HF 版只用文本流的 768 维，layout 流最后一层的输出直接丢掉，layout 信息只能通过 12 层 BiACM 间接进入文本流。</p>
+</div>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>LiLT = RoBERTa-base（文本流，124 M）+ LiLT 本体（layout 流，6.1 M）。</li>
+    <li>两条流层数、头数相同，layout 流的宽度是文本流的 1/4：192 维，每头 16 维，FFN 768。</li>
+    <li>模型只吃三个输入：<code>input_ids</code>、<code>bbox</code>、<code>attention_mask</code>。<code>position_ids</code> 由模型自己算，两条流共用。</li>
+    <li>HF 的 <code>LiltModel</code> 只返回文本流；要 layout 流的输出得自己挂 hook。</li>
+  </ol>
+</section>
+
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

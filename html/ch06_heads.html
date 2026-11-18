@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 6 章 · 输出与任务头 — LiLT 架构课</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch06_heads.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+
+<div class="kicker">第 06 章</div>
+<h1>输出与任务头</h1>
+<p class="lede">12 层之后，两条流各留下一份特征。原版仓库把它们拼成 960 维交给任务头，HF 版只用文本流的 768 维。这一章先讲清这个差别，再看两个下游任务的头：SER（逐 token 分类）和 RE（关系抽取）。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch06_heads.py"><code>code/ch06_heads.py</code></a></span>
+  <span class="pill">运行 <code>python ch06_heads.py</code></span>
+</div>
+
+<h2><span class="sec">§1</span>两条流的最终输出</h2>
+<div class="out"><div class="out-head"><span>python ch06_heads.py · §1</span><b>真实权重</b></div><pre>  文本流   1x66x768
+  layout流 1x66x192   ← HF 的 LiltModel 不返回它，这里是用 hook 取出来的
+  HF last_hidden_state 1x66x768  pooler_output 768 维（取 &lt;s&gt; 过 dense+tanh）</pre></div>
+<p><code>pooler_output</code> 是 &lt;s&gt; 的向量过一层 dense + tanh，给文档分类这类整篇级任务用；SER 和 RE 都用不到。</p>
+
+<h2><span class="sec">§2</span>原版 vs HF 的 token 分类头</h2>
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="原版任务头输入 960 维拼接特征，HF 任务头只输入 768 维文本特征">
+  <defs><marker id="a6" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker></defs>
+  <text x="180" y="22" text-anchor="middle" class="d-text" font-size="14" font-weight="600">原版仓库（论文数字来自这里）</text>
+  <rect x="20" y="132" width="150" height="36" rx="8" class="d-t"/><text x="95" y="155" text-anchor="middle" class="d-mono" font-size="12">文本 [L, 768]</text>
+  <rect x="190" y="132" width="150" height="36" rx="8" class="d-l"/><text x="265" y="155" text-anchor="middle" class="d-mono" font-size="12">layout [L, 192]</text>
+  <path d="M95,132 V112 H160" class="d-arrow" marker-end="url(#a6)"/>
+  <path d="M265,132 V112 H202" class="d-arrow" marker-end="url(#a6)"/>
+  <rect x="120" y="76" width="120" height="30" rx="8" class="d-box"/><text x="180" y="96" text-anchor="middle" class="d-mono" font-size="12">拼接 [L, 960]</text>
+  <path d="M180,76 V58" class="d-arrow" marker-end="url(#a6)"/>
+  <rect x="100" y="32" width="160" height="26" rx="8" class="d-box"/><text x="180" y="50" text-anchor="middle" class="d-mono" font-size="12">Linear(960, 7)</text>
+  <line x1="380" y1="14" x2="380" y2="186" class="d-grid"/>
+  <text x="580" y="22" text-anchor="middle" class="d-text" font-size="14" font-weight="600">HF transformers 的 LiltForTokenClassification</text>
+  <rect x="430" y="132" width="150" height="36" rx="8" class="d-t"/><text x="505" y="155" text-anchor="middle" class="d-mono" font-size="12">文本 [L, 768]</text>
+  <rect x="600" y="132" width="150" height="36" rx="8" style="fill:none;stroke:var(--axis);stroke-dasharray:4 4"/><text x="675" y="155" text-anchor="middle" class="d-muted" font-size="12">layout [L, 192] 丢弃</text>
+  <path d="M505,132 V58" class="d-arrow" marker-end="url(#a6)"/>
+  <rect x="425" y="32" width="160" height="26" rx="8" class="d-box"/><text x="505" y="50" text-anchor="middle" class="d-mono" font-size="12">Linear(768, 7)</text>
+  <text x="672" y="190" text-anchor="middle" class="d-muted" font-size="11.5">只经 BiACM 间接起作用</text>
+</svg>
+<figcaption>7 是 FUNSD 的标签数：O 加上 HEADER / QUESTION / ANSWER 各自的 B-、I-。</figcaption>
+</figure>
+<p>原版代码（<code>modeling_LiLTRobertaLike.py</code>）里，分类头的输入是 <code>hidden_size + hidden_size // channel_shrink_ratio</code>：</p>
+<pre class="code"><code>self.classifier = nn.Linear(config.hidden_size + config.hidden_size//config.channel_shrink_ratio, config.num_labels)
+...
+sequence_output = torch.cat([sequence_output, layout_outputs], -1)
+logits = self.classifier(sequence_output)</code></pre>
+<div class="out"><div class="out-head"><span>python ch06_heads.py · §2</span><b>真实权重</b></div><pre>  HF  LiltForTokenClassification.classifier = Linear(in_features=<span class="hl">768</span>, out_features=7, bias=True)
+  原版 LiLTRobertaLikeForTokenClassification.classifier = Linear(in_features=<span class="hl">960</span>, out_features=7, bias=True)</pre></div>
+<div class="callout warn">
+  <span class="ct">用 HF 版时要知道的事</span>
+  <p>用 HF 权重微调出来的模型，和论文报告数字的那个模型，严格说<strong>不是同一个结构</strong>：HF 版的 layout 信息只能通过 12 层 BiACM 的注意力分数间接进入文本流，最后一层的 192 维 layout 输出没有直接进头。差多少要在自己的数据上量。如果想要原版结构，可以像 <code>common.py</code> 那样用 hook 取出 layout 输出，自己拼接。</p>
+</div>
+
+<h2><span class="sec">§3</span>SER：逐 token 分类 → 词级标签 → 实体</h2>
+<p>SER（Semantic Entity Recognition）给每个词打 BIO 标签。从 logits 到实体分三步：</p>
+<ol>
+  <li><strong>token 级</strong>：特征 <span class="chip">[1, 66, 960]</span> 过线性层得到 <span class="chip">[1, 66, 7]</span>，每个 token 取 argmax。</li>
+  <li><strong>词级</strong>：每个词只看它<strong>第一个 subword</strong> 的预测，和训练时只给首个 subword 打标签对应（第 2 章 §4）。这一步要用 <code>word_ids</code>。</li>
+  <li><strong>实体</strong>：B-X 开头、后面连续的 I-X 合并成一个 X 实体。比如 <code>Invoice</code>=B-QUESTION、<code>No:</code>=I-QUESTION 合成一个 QUESTION 实体 “Invoice No:”。</li>
+</ol>
+<pre class="code"><code>word_pred, seen = {}, set()
+for i, wid in enumerate(enc["word_ids"]):
+    if wid is not None and wid not in seen:      # 每个词只取第一个 subword
+        seen.add(wid)
+        word_pred[wid] = LABELS[pred[i]]</code></pre>
+<div class="out"><div class="out-head"><span>python ch06_heads.py · §3</span><b>head 未训练，只看格式</b></div><pre>  特征 1x66x960 → logits 1x66x7
+  词级预测（未训练的 head，只看格式）：
+     ACME           预测 I-QUESTION  真值 B-HEADER
+     SUPPLY         预测 I-QUESTION  真值 I-HEADER
+     CO.            预测 B-QUESTION  真值 I-HEADER
+     INVOICE        预测 B-HEADER    真值 B-HEADER
+     Invoice        预测 I-QUESTION  真值 B-QUESTION
+     No:            预测 I-QUESTION  真值 I-QUESTION</pre></div>
+<p>分类头是随机初始化的，预测是乱的，这里只看数据怎么流。真正的头要在 FUNSD 这类标注数据上训练。</p>
+
+<h2><span class="sec">§4</span>RE：判断两个实体之间是不是 key-value 关系</h2>
+<p>RE（Relation Extraction）在 SER 的实体之上做：哪个 QUESTION 对应哪个 ANSWER。官方 <code>re.py</code> 的结构：</p>
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="关系抽取头：实体首 token 特征加类型向量，经 MLP 后 biaffine 打分">
+  <defs><marker id="a6b" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker></defs>
+  <rect x="10" y="24" width="170" height="52" rx="8" class="d-box"/>
+  <text x="95" y="45" text-anchor="middle" class="d-text" font-size="12.5">head 实体（QUESTION）</text>
+  <text x="95" y="64" text-anchor="middle" class="d-mono" font-size="11">首 token 960 ⊕ 类型 960</text>
+  <rect x="10" y="134" width="170" height="52" rx="8" class="d-box"/>
+  <text x="95" y="155" text-anchor="middle" class="d-text" font-size="12.5">tail 实体（ANSWER）</text>
+  <text x="95" y="174" text-anchor="middle" class="d-mono" font-size="11">首 token 960 ⊕ 类型 960</text>
+  <path d="M180,50 H222" class="d-arrow" marker-end="url(#a6b)"/>
+  <path d="M180,160 H222" class="d-arrow" marker-end="url(#a6b)"/>
+  <rect x="224" y="24" width="200" height="52" rx="8" class="d-box"/>
+  <text x="324" y="45" text-anchor="middle" class="d-text" font-size="12.5">MLP（head 专用）</text>
+  <text x="324" y="64" text-anchor="middle" class="d-mono" font-size="11">1920 → 768 → 384，ReLU</text>
+  <rect x="224" y="134" width="200" height="52" rx="8" class="d-box"/>
+  <text x="324" y="155" text-anchor="middle" class="d-text" font-size="12.5">MLP（tail 专用）</text>
+  <text x="324" y="174" text-anchor="middle" class="d-mono" font-size="11">1920 → 768 → 384，ReLU</text>
+  <path d="M424,50 H470 V88 H492" class="d-arrow" marker-end="url(#a6b)"/>
+  <path d="M424,160 H470 V122 H492" class="d-arrow" marker-end="url(#a6b)"/>
+  <text x="446" y="42" text-anchor="middle" class="d-mono" font-size="11">h</text>
+  <text x="446" y="152" text-anchor="middle" class="d-mono" font-size="11">t</text>
+  <rect x="494" y="74" width="160" height="62" rx="8" class="d-box"/>
+  <text x="574" y="96" text-anchor="middle" class="d-text" font-size="12.5" font-weight="600">biaffine</text>
+  <text x="574" y="115" text-anchor="middle" class="d-mono" font-size="11">hᵀW t + V[h; t] + b</text>
+  <path d="M654,105 H690" class="d-arrow" marker-end="url(#a6b)"/>
+  <text x="696" y="101" class="d-text" font-size="12.5">2 类</text>
+  <text x="696" y="118" class="d-muted" font-size="11">是 / 不是</text>
+</svg>
+<figcaption>960 是原版的拼接特征维度。类型向量来自一个 3 × 960 的 embedding（0 其他、1 question、2 answer），和首 token 特征拼成 1920 维。</figcaption>
+</figure>
+<ul>
+  <li><strong>候选对</strong>：一篇文档里所有 (question, answer) 组合。训练时，标注里有的是正例，其余全是负例。</li>
+  <li><strong>实体表示</strong>：只用实体<strong>第一个 token</strong> 的特征，加上类型向量。</li>
+  <li><strong>打分</strong>：biaffine = 双线性项 hᵀWt（捕捉“这对组合”）+ 线性项 V[h; t]（各自的倾向），输出 2 类。</li>
+</ul>
+<div class="out"><div class="out-head"><span>python ch06_heads.py · §4</span><b>head 未训练，只看 shape</b></div><pre>  question 实体 4 个，answer 实体 5 个 → 候选对 20 个（所有 question × answer）
+  head 表示 20x1920 → MLP → 20x384
+  biaffine 打分 → 20x2   （是 / 不是 key-value 对）
+  例： 'Invoice'→'INV-2024-0042', 'Invoice'→'March', 'Invoice'→'Jane', 'Invoice'→'42' ...</pre></div>
+<p>示例发票里 4 个 QUESTION × 5 个 ANSWER = 20 个候选对。示例数据本身没有关系标注；按常识，真正的 key-value 对大约 5 个（Bill To: 同时对应姓名和地址两行），其余 15 个都是负例。负例远多于正例，是 RE 的常态。</p>
+
+<h2><span class="sec">§5</span>论文里的效果</h2>
+<p>FUNSD 上的 SER（论文表 2），都是 BASE 尺寸：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="n">Precision</th><th class="n">Recall</th><th class="n">F1</th></tr></thead>
+  <tbody>
+    <tr><td>BERT</td><td class="n">0.5469</td><td class="n">0.6710</td><td class="n">0.6026</td></tr>
+    <tr><td>RoBERTa（LiLT [英文 RoBERTa] 的文本流就是它）</td><td class="n">0.6349</td><td class="n">0.6975</td><td class="n">0.6648</td></tr>
+    <tr><td>LayoutLM</td><td class="n">0.7597</td><td class="n">0.8155</td><td class="n">0.7866</td></tr>
+    <tr><td>LayoutLMv2（带图像）</td><td class="n">0.8029</td><td class="n">0.8539</td><td class="n">0.8276</td></tr>
+    <tr class="best"><td>LiLT [英文 RoBERTa]</td><td class="n">0.8721</td><td class="n">0.8965</td><td class="n">0.8841</td></tr>
+    <tr><td>LiLT [InfoXLM，多语言]</td><td class="n">0.8467</td><td class="n">0.8709</td><td class="n">0.8586</td></tr>
+  </tbody>
+</table></div>
+<p>文本流同样从 RoBERTa-base 出发，加上预训练过的 6.1 M 参数 layout 流以后，F1 从 0.665 到 0.884。LiLT 不用图像特征，比带图像的 LayoutLMv2 还高。</p>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>原版任务头吃 960 维（文本 768 + layout 192）；HF 版只吃文本 768 维，结构和论文不同。</li>
+    <li>SER：token logits → 每个词取首个 subword → BIO 合并成实体，全程依赖 <code>word_ids</code>。</li>
+    <li>RE：所有 question × answer 组合当候选，实体用首 token 特征 + 类型向量，biaffine 二分类。</li>
+    <li>论文的 FUNSD 结果：从 RoBERTa-base 出发，加上 layout 流，F1 0.665 → 0.884。</li>
+  </ol>
+</section>
+
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>
