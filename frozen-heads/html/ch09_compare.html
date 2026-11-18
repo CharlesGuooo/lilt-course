@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 9 章 · 横向对比与验证方案 — 冻结 LiLT 上的 head</title>
+<meta name="description" content="八类 head 在 FUNSD 上的汇总表、多任务存储总账、CPU 时间占比、证据边界，以及换到自己数据上的验证步骤和参考文献。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch09_compare.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="kicker">第 09 章</div>
+<h1>横向对比与验证方案</h1>
+<p class="lede">前八章的结果放进同一张表，再算两笔账：几十个任务时所有 head 一共多大；一份文档的 CPU 时间里 head 占多少。最后讲这些数字<strong>不能</strong>告诉你什么，以及换到自己的数据上该怎么测。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch09_compare.py"><code>code/ch09_compare.py</code></a>（只读前面各章存下的结果）</span>
+</div>
+
+<h2><span class="sec">§1</span>同一张表</h2>
+<div class="out"><div class="out-head"><span>python ch09_compare.py · §1</span><b>FUNSD · 冻结 LiLT</b></div><pre>  head                            宏F1  header    实体全对    ECE       参数/存量        文件       延迟
+  linear · text 768        0.657±0.001   0.506   0.731  0.018       3,076     14 KB   0.04ms
+  linear · both 960        0.679±0.005   0.558   0.712  0.011       3,844     17 KB   0.04ms
+  MLP 960→256              0.690±0.003   0.584   0.708  0.159     247,044    967 KB   0.25ms
+  Conv1D 感受野 7             0.688±0.011   0.563   0.732  0.103     935,428    3.6 MB   1.70ms
+  BiLSTM 2×128             0.719±0.020   0.621   0.755  0.157   1,117,188    4.3 MB   6.16ms
+  Transformer 1 层          0.688±0.013   0.581   0.705  0.092     774,660    3.0 MB   1.73ms
+  linear + CRF             0.695±0.007   0.572   0.776  0.033       3,868     18 KB   5.54ms
+  Transformer + 2D 偏置      0.691±0.007   0.597   0.718  0.075     774,908    3.0 MB   3.01ms
+  biaffine 片段              0.580±0.016   0.509   0.613  0.326     379,504    1.5 MB  19.69ms
+  GBDT 964 维               0.668±0.000   0.548   0.701  0.048      26,108    3.4 MB  10.42ms
+  GBDT PCA64+4             0.629±0.000   0.539   0.633  0.040      21,472    1.6 MB   5.98ms
+  NCM 类均值                  0.440±0.000   0.309   0.428  0.027       3,840     15 KB   0.09ms
+  kNN k=10                 0.618±0.000   0.558   0.594  0.018  16,751,040   32.0 MB  18.01ms
+  ProtoNER 式               0.416±0.017   0.302   0.355  0.144     192,000    750 KB   0.60ms
+  ± 是 3 个随机种子的标准差；GBDT、NCM、kNN 没有随机性，只跑一次。
+  参数/存量：神经网络是参数个数；树是节点个数；NCM、kNN、ProtoNER 式是存下的浮点数个数。</pre></div>
+<div class="chart" id="chart-all">
+  <p class="chart-title">14 个 head，换个指标看</p>
+  <div class="controls" style="margin:4px 0 6px"><label>指标 <select aria-label="选择指标">
+    <option value="macro">逐词宏 F1</option>
+    <option value="header">header F1</option>
+    <option value="ent">实体全对率</option>
+    <option value="ece">ECE（越低越好）</option>
+    <option value="lat">单线程延迟（n=256）</option>
+    <option value="size">每个任务的文件大小</option>
+  </select></label></div>
+  <p class="chart-sub">按当前指标从好到差排序；橙色是线性基线（both 960）。延迟和文件大小用对数轴。</p>
+  <div class="plot"></div>
+</div>
+<p>几点读法：</p>
+<ul>
+  <li><strong>准确率</strong>：BiLSTM 最高（0.719），然后是 CRF（0.695）、带二维偏置的 Transformer（0.691）、MLP（0.690）、卷积和 Transformer（0.688），都只比线性基线（0.679）高 1 ~ 4 个点。看一下 ± 标准差：0.01 左右的差距大多在噪声里。片段 head（0.580）和原型法（0.42 ~ 0.62）明显落后。</li>
+  <li><strong>实体全对率</strong>：CRF 最高（0.776），比 BiLSTM（0.755）还高。下游要的是整个字段的值时，CRF 很划算。</li>
+  <li><strong>置信度</strong>：只有线性、CRF、NCM、kNN 的 ECE 在 0.035 以下。带隐藏层的 head 全都过度自信，用之前要校准。</li>
+  <li><strong>延迟</strong>：从 0.04 ms 到 20 ms，跨了近三个数量级，但最慢的也只有 backbone 的 5%（§3）。</li>
+  <li><strong>文件大小</strong>：从 15 KB 到 32 MB。这一项乘上任务数，才是真正要算的账（§2）。</li>
+</ul>
+
+<h2><span class="sec">§2</span>多任务总账</h2>
+<div class="out"><div class="out-head"><span>python ch09_compare.py · §2</span><b>FUNSD · 冻结 LiLT</b></div><pre>  backbone（LiLT-roberta-en-base）参数 130.8M → fp32 523 MB · fp16 262 MB
+  T = 60 个任务时，head 一共占多少（对照：每个任务各存一份微调过的 fp32 backbone = 31.4 GB）：
+    linear · text 768           0.85 MB   = backbone 的 0.2%
+    linear · both 960           1.04 MB   = backbone 的 0.2%
+    MLP 960→256                59.43 MB   = backbone 的 11.4%
+    Conv1D 感受野 7              224.67 MB   = backbone 的 43.0%
+    BiLSTM 2×128              268.34 MB   = backbone 的 51.3%
+    Transformer 1 层           186.28 MB   = backbone 的 35.6%
+    linear + CRF                1.08 MB   = backbone 的 0.2%
+    Transformer + 2D 偏置       186.37 MB   = backbone 的 35.6%
+    biaffine 片段                91.26 MB   = backbone 的 17.4%
+    GBDT 964 维                211.18 MB   = backbone 的 40.4%
+    GBDT PCA64+4               98.74 MB   = backbone 的 18.9%
+    NCM 类均值                     0.92 MB   = backbone 的 0.2%
+    kNN k=10                 2010.12 MB   = backbone 的 384.3%
+    ProtoNER 式                 46.08 MB   = backbone 的 8.8%
+  kNN 存的是训练词本身；任务越多、数据越多，它涨得越快。</pre></div>
+<div class="widget" id="w-cost">
+  <div class="widget-title">拖动任务数，看所有 head 一共多大</div>
+  <p class="widget-sub">每个任务一个 head，文件大小按 FUNSD 上训练出的实际文件算（标签数不同时会略有出入）。对数轴。</p>
+  <div class="controls"><input type="range" min="1" max="200" step="1" value="60" aria-label="任务数"><b class="t-out"></b></div>
+  <div class="stats cost-stats"></div>
+  <div class="chart" style="border:0;padding:0;margin:0"><div class="plot"></div></div>
+</div>
+<p>60 个任务时：线性、CRF、NCM 的 head 加起来约 1 MB，可以忽略。MLP 和 ProtoNER 式是几十 MB。序列类、片段和树模型是 90 ~ 270 MB，最多相当于半个 backbone。kNN 是 2 GB，是 backbone 的 3.8 倍。作为对照，每个任务各存一份微调过的 backbone 要 31 GB。共享冻结 backbone 省下的主要就是这一项，前提是 head 选得小。</p>
+
+<h2><span class="sec">§3</span>一份文档的 CPU 时间</h2>
+<div class="out"><div class="out-head"><span>python ch09_compare.py · §3</span><b>FUNSD · 冻结 LiLT</b></div><pre>  backbone 512 token：392 ms（第 1 章实测，Apple M1）
+    + linear · text 768         0.04 ms   head 占 0.0%
+    + linear · both 960         0.04 ms   head 占 0.0%
+    + MLP 960→256               0.25 ms   head 占 0.1%
+    + Conv1D 感受野 7              1.70 ms   head 占 0.4%
+    + BiLSTM 2×128              6.16 ms   head 占 1.5%
+    + Transformer 1 层           1.73 ms   head 占 0.4%
+    + linear + CRF              5.54 ms   head 占 1.4%
+    + Transformer + 2D 偏置       3.01 ms   head 占 0.8%
+    + biaffine 片段              19.69 ms   head 占 4.8%
+    + GBDT 964 维               10.42 ms   head 占 2.6%
+    + GBDT PCA64+4              5.98 ms   head 占 1.5%
+    + NCM 类均值                   0.09 ms   head 占 0.0%
+    + kNN k=10                 18.01 ms   head 占 4.4%
+    + ProtoNER 式                0.60 ms   head 占 0.2%</pre></div>
+<p>最慢的 head（片段 4.8%、kNN 4.4%）在一份文档的总耗时里也只占零头，单线程下 backbone 一次前向的 392 ms 才是大头。所以选 head 时，延迟基本不构成约束。例外是文档远长于 512 个 token：Transformer 和片段 head 的耗时会随长度加速增长。</p>
+
+<h2><span class="sec">§4</span>这些数字不能告诉你什么</h2>
+<ul>
+  <li><strong>FUNSD 不是你的数据</strong>：199 份英文扫描表单，标签是 question / answer / header 这类语义角色，训练集 119 份，只有一个任务。业务字段（金额、日期、编号）的可分性、版式的多样性、标注量，都可能完全不同。</li>
+  <li><strong>逐词指标不是字段值的 exact match</strong>：主指标是逐词宏 F1。字段级的完整匹配还取决于实例边界和文本归一化规则（<a href="ch06_span.html">第 6 章</a>）。</li>
+  <li><strong>没有为每个 head 单独调参</strong>：统一预算对比较公平，但每个 head 都不是它的最佳状态。差距在 1 个点以内的，不要当成结论。</li>
+  <li><strong>计时只是 head 本身</strong>：单线程、batch=1、Apple M1。不含特征序列化、网络、加载和并发。目标 CPU 的绝对数字会不同。</li>
+  <li><strong>论文数字只属于它们自己的设置</strong>：数据集、编码器、是否冻结、标签方案、硬件都不同，不能投射成这里的预测。</li>
+</ul>
+
+<h2><span class="sec">§5</span>换到自己的数据上：验证步骤</h2>
+<p>下面是一套可以照着做的本地对照。右列是本课在 FUNSD 上怎么落实的，可以直接改造 <code>code/</code> 里的脚本。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>步骤</th><th>要做什么</th><th>本课在 FUNSD 上的做法</th></tr></thead>
+  <tbody>
+    <tr><td>1 锁定接口</td><td>记录 backbone checkpoint、分词器版本；逐词特征的形状和精度；有效位置掩码；subword→词映射；是否带词框；长文档窗口策略。确认 head 拿到的是每个词的向量，不是整页的一个向量。</td><td>both 960 维，fp16 缓存；每词取第一个 subword；不重叠窗口（<a href="ch01_testbed.html">第 1 章</a>）</td></tr>
+    <tr><td>2 固定切分和标签</td><td>所有候选用同一份标签映射、同一份训练 / 验证 / 测试划分。按文档或模板分组切分，避免相似文档跨集合导致结果偏乐观。</td><td>官方训练集每 5 份取 1 份做 dev；测试集只在最后用</td></tr>
+    <tr><td>3 按顺序加复杂度</td><td>先线性，再 MLP；看错误类型决定是否试序列 head；版面、片段、树、原型先检查输入和监督是否成立。CRF 当作可组合的变量，和同一个发射 head 做有 / 无对照。</td><td>第 2 → 8 章的顺序</td></tr>
+    <tr><td>4 分开报质量</td><td>逐类 P/R/F1、宏 / 微平均、Other 的表现、业务要的字段完整匹配。写清楚文本归一化、多词、跨行、重复实例的规则。不要把逐词 F1 写成 exact-field accuracy。</td><td>逐词宏 F1 + 实体全对率 + 片段级 exact match（<a href="ch06_span.html">第 6 章</a>）</td></tr>
+    <tr><td>5 量置信度</td><td>可靠性图和 ECE；不可靠的先在 dev 上校准（如温度缩放），再定人工复核阈值。</td><td>每个 head 都报 ECE（<a href="ch02_linear.html">第 2 章</a>、<a href="ch04_crf.html">第 4 章</a>）</td></tr>
+    <tr><td>6 在目标 CPU 上测</td><td>固定 CPU 型号、线程数、运行时、输入长度、batch、精度、预热和重复次数；报冷 / 热态 p50 / p95、吞吐、峰值内存、文件大小、加载时间；另测特征序列化和传输。head 单测不能冒充端到端延迟。</td><td>单线程、batch=1、n = 64 ~ 512 的 p50 / p95；backbone 单独测</td></tr>
+    <tr><td>7 算多任务的账</td><td>独立 head 与共享 head 分别记录总资产、任务路由、单任务质量和跨任务干扰。先用有代表性的几个任务验证，再铺开。</td><td>§2 的总账；共享 head 没有测（FUNSD 只有一个任务）</td></tr>
+    <tr><td>8 先约定验收线</td><td>准确率的非劣界限、延迟和内存上限、总存储预算、可接受的维护成本。没有这些阈值，只能比较曲线，不能宣布赢家。</td><td>本课没有阈值，所以不宣布赢家</td></tr>
+  </tbody>
+</table></div>
+
+<h2><span class="sec">§6</span>一个建议的实测顺序</h2>
+<ol>
+  <li><strong>先把输出契约定成 960 维</strong>（文本 + layout），跑线性 head，看逐类 F1、混淆矩阵和可靠性图。这一步几乎零成本，也是后面所有比较的基线。</li>
+  <li><strong>加 CRF</strong>：只多 24 个参数，文件不变，FUNSD 上实体全对率涨了 6 个点。下游要整字段的值时，优先试它。</li>
+  <li><strong>错误集中在上下文时，试 BiLSTM</strong>（或卷积）：FUNSD 上 +4 个点。代价是每个任务约 4 MB、置信度失准，要配温度缩放。</li>
+  <li><strong>需要字段级完整值时，先算上限</strong>：用<a href="ch06_span.html">第 6 章</a>的方法，统计“连续同标签合并”对真实实例的上限。上限不够就补 B/I 或实例编号的标注，换 head 解决不了。</li>
+  <li><strong>版面、树、原型只在特定条件下考虑</strong>：错误明显集中在多栏、表格这类二维关系上，才试版面 head；部署必须脱离 PyTorch，才试树；字段频繁增加、每个新字段只能标一两份文档，才试原型。</li>
+</ol>
+
+<h2 id="refs"><span class="sec">§7</span>参考文献</h2>
+<p style="font-size:13.5px;color:var(--muted)">访问于 2026-11。没读到正文、只读了摘要的，标了“摘要”。</p>
+<ol class="refs">
+  <li>Wang, Jin, Ding. <em>LiLT: A Simple yet Effective Language-Independent Layout Transformer for Structured Document Understanding</em>. ACL 2022. <a href="https://arxiv.org/abs/2202.13669">arXiv:2202.13669</a> · 代码 <a href="https://github.com/jpWang/LiLT">jpWang/LiLT</a> <span class="src">（第 0、2 章）</span></li>
+  <li>HuggingFace Transformers, <code>modeling_lilt.py</code>（<code>LiltForTokenClassification</code>）. <a href="https://github.com/huggingface/transformers/blob/main/src/transformers/models/lilt/modeling_lilt.py">源码</a> <span class="src">（第 2 章）</span></li>
+  <li>Jaume, Ekenel, Thiran. <em>FUNSD: A Dataset for Form Understanding in Noisy Scanned Documents</em>. 2019. <a href="https://arxiv.org/abs/1905.13538">arXiv:1905.13538</a> · <a href="https://guillaumejaume.github.io/FUNSD/">数据集主页与许可</a> <span class="src">（第 1 章）</span></li>
+  <li>Devlin et al. <em>BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding</em>. NAACL 2019, §5.3. <a href="https://arxiv.org/abs/1810.04805">arXiv:1810.04805</a> <span class="src">（第 0、3 章）</span></li>
+  <li>Peters, Ruder, Smith. <em>To Tune or Not to Tune? Adapting Pretrained Representations to Diverse Tasks</em>. RepL4NLP 2019. <a href="https://arxiv.org/abs/1903.05987">arXiv:1903.05987</a> <span class="src">（第 0、3 章）</span></li>
+  <li>Liu et al. <em>Linguistic Knowledge and Transferability of Contextual Representations</em>. NAACL 2019. <a href="https://arxiv.org/abs/1903.08855">arXiv:1903.08855</a>（摘要） <span class="src">（第 3 章）</span></li>
+  <li>Hewitt, Liang. <em>Designing and Interpreting Probes with Control Tasks</em>. EMNLP 2019. <a href="https://arxiv.org/abs/1909.03368">arXiv:1909.03368</a>（摘要） <span class="src">（第 2 章）</span></li>
+  <li>Guo et al. <em>On Calibration of Modern Neural Networks</em>. ICML 2017. <a href="https://arxiv.org/abs/1706.04599">arXiv:1706.04599</a> <span class="src">（第 1、2 章）</span></li>
+  <li>Vaswani et al. <em>Attention Is All You Need</em>. NeurIPS 2017, Table 1. <a href="https://arxiv.org/abs/1706.03762">arXiv:1706.03762</a> <span class="src">（第 3 章）</span></li>
+  <li>Strubell et al. <em>Fast and Accurate Entity Recognition with Iterated Dilated Convolutions</em>. EMNLP 2017. <a href="https://arxiv.org/abs/1702.02098">arXiv:1702.02098</a>（摘要） <span class="src">（第 3 章）</span></li>
+  <li>Xu et al. <em>LayoutLMv2: Multi-modal Pre-training for Visually-Rich Document Understanding</em>. ACL 2021. <a href="https://arxiv.org/abs/2012.14740">arXiv:2012.14740</a> <span class="src">（第 5 章）</span></li>
+  <li>Yu et al. <em>PICK: Processing Key Information Extraction from Documents using Improved Graph Learning-Convolutional Networks</em>. ICPR 2020. <a href="https://arxiv.org/abs/2004.07464">arXiv:2004.07464</a> · <a href="https://github.com/wenwenyu/PICK-pytorch">代码（MIT）</a> <span class="src">（第 5 章）</span></li>
+  <li>Denk, Reisswig. <em>BERTgrid: Contextualized Embedding for 2D Document Representation and Understanding</em>. 2019. <a href="https://arxiv.org/abs/1909.04948">arXiv:1909.04948</a> <span class="src">（第 5 章）</span></li>
+  <li>Katti et al. <em>Chargrid: Towards Understanding 2D Documents</em>. EMNLP 2018. <a href="https://arxiv.org/abs/1809.08799">arXiv:1809.08799</a> <span class="src">（第 5 章）</span></li>
+  <li>Hong et al. <em>BROS: A Pre-trained Language Model Focusing on Text and Layout for Better Key Information Extraction from Documents</em>. AAAI 2022. <a href="https://arxiv.org/abs/2108.04539">arXiv:2108.04539</a>（摘要） · <a href="https://github.com/clovaai/bros">代码（Apache-2.0）</a> <span class="src">（第 5 章）</span></li>
+  <li>Yu, Bohnet, Poesio. <em>Named Entity Recognition as Dependency Parsing</em>. ACL 2020. <a href="https://arxiv.org/abs/2005.07150">arXiv:2005.07150</a> · <a href="https://github.com/juntaoy/biaffine-ner">代码（Apache-2.0）</a> <span class="src">（第 6 章）</span></li>
+  <li>Hwang et al. <em>Spatial Dependency Parsing for Semi-Structured Document Information Extraction</em>（SPADE）. Findings of ACL 2021. <a href="https://arxiv.org/abs/2005.00642">arXiv:2005.00642</a> <span class="src">（第 6 章）</span></li>
+  <li><em>Entity Relation Extraction as Dependency Parsing in Visually Rich Documents</em>（SERA）. EMNLP 2021. <a href="https://arxiv.org/abs/2110.09915">arXiv:2110.09915</a> <span class="src">（第 6 章）</span></li>
+  <li>Grinsztajn, Oyallon, Varoquaux. <em>Why do tree-based models still outperform deep learning on tabular data?</em> NeurIPS 2022 Datasets and Benchmarks. <a href="https://arxiv.org/abs/2207.08815">arXiv:2207.08815</a>（摘要） <span class="src">（第 7 章）</span></li>
+  <li>Palm, Winther, Laws. <em>CloudScan – A configuration-free invoice analysis system using recurrent neural networks</em>. ICDAR 2017. <a href="https://arxiv.org/abs/1708.07403">arXiv:1708.07403</a>（摘要） <span class="src">（第 7 章）</span></li>
+  <li>ONNXMLTools. <a href="https://github.com/onnx/onnxmltools">onnx/onnxmltools</a> <span class="src">（第 7 章）</span></li>
+  <li>Snell, Swersky, Zemel. <em>Prototypical Networks for Few-shot Learning</em>. NeurIPS 2017. <a href="https://arxiv.org/abs/1703.05175">arXiv:1703.05175</a> <span class="src">（第 8 章）</span></li>
+  <li>Yang, Katiyar. <em>Simple and Effective Few-Shot Named Entity Recognition with Structured Nearest Neighbor Learning</em>. EMNLP 2020. <a href="https://arxiv.org/abs/2010.02405">arXiv:2010.02405</a> <span class="src">（第 8 章）</span></li>
+  <li><em>ProtoNER: Few shot Incremental Learning for Named Entity Recognition using Prototypical Networks</em>. 2023. <a href="https://arxiv.org/abs/2310.02372">arXiv:2310.02372</a> <span class="src">（第 8 章；未找到公开代码）</span></li>
+  <li>Gemelli et al. <em>Doc2Graph: a Task Agnostic Document Understanding Framework based on Graph Neural Networks</em>. 2022. <a href="https://arxiv.org/abs/2208.11168">arXiv:2208.11168</a> <span class="src">（第 5 章）</span></li>
+</ol>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>FUNSD 上没有一类 head 全面胜出：BiLSTM 准确率最高，CRF 实体全对率最高，线性在置信度、大小、速度上最好。</li>
+    <li>和线性基线相比，最好的 head 也只多 4 个点；片段、树、原型在冻结特征上不划算。</li>
+    <li>延迟不是约束，head 最多占 backbone 的 5%。真正要算的是多任务的文件总量：60 个任务时，从 1 MB（线性）到 2 GB（kNN）。</li>
+    <li>扁平标签封住了实体级上限（0.574），这比换 head 更值得先解决。换到自己的数据上，按 §5 的步骤重测，再用约定好的验收线做决定。</li>
+  </ol>
+</section>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

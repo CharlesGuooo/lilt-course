@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 4 章 · 解码层：CRF — 冻结 LiLT 上的 head</title>
+<meta name="description" content="在线性发射分数上加线性链 CRF：扁平标签下 CRF 学到什么、实体全对率、边际概率作为置信度、延迟与导出。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch04_crf.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="kicker">第 04 章</div>
+<h1>解码层：CRF</h1>
+<p class="lede">CRF 本身不是一类 head。它是叠在任何“逐词打分”的 head 上面的解码层：不再让每个词各自取最大概率，而是给整条标签序列打分，选总分最高的那条。所以它该被当成一个可组合的变量：同一个发射 head，加 CRF 和不加 CRF，各测一遍。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch04_crf.py"><code>code/ch04_crf.py</code></a></span>
+  <span class="pill">实现 <a href="../code/heads.py"><code>CRFHead</code></a>（约 60 行，没有外部依赖）</span>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 220" role="img" aria-label="CRF 的网格：每个位置每个标签一个发射分数，相邻位置之间有转移分数，Viterbi 选出一条路径">
+  <defs><marker id="a4" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker></defs>
+  <g font-size="12" class="d-text">
+    <text x="60" y="52" text-anchor="end">other</text><text x="60" y="92" text-anchor="end">question</text><text x="60" y="132" text-anchor="end">answer</text><text x="60" y="172" text-anchor="end">header</text>
+  </g>
+  <g class="d-muted" font-size="12" text-anchor="middle">
+    <text x="130" y="206">Date:</text><text x="270" y="206">March</text><text x="410" y="206">15,</text><text x="550" y="206">2024</text><text x="690" y="206">Total</text>
+  </g>
+  <g class="d-line" style="opacity:.35">
+    <path d="M130,48 L270,88 M130,88 L270,128 M130,128 L270,48 M130,48 L270,128 M130,168 L270,88 M270,88 L410,128 M270,128 L410,48 M410,48 L550,128 M410,88 L550,128 M550,128 L690,48 M550,48 L690,88 M550,88 L690,128"/>
+  </g>
+  <g class="d-arrow" style="stroke:var(--layout);stroke-width:3">
+    <path d="M136,88 L264,128" marker-end="url(#a4)"/><path d="M276,128 L404,128" marker-end="url(#a4)"/><path d="M416,128 L544,128" marker-end="url(#a4)"/><path d="M556,128 L684,88" marker-end="url(#a4)"/>
+  </g>
+  <g>
+    <circle cx="130" cy="48" r="9" class="d-box"/><circle cx="130" cy="88" r="9" class="d-l"/><circle cx="130" cy="128" r="9" class="d-box"/><circle cx="130" cy="168" r="9" class="d-box"/>
+    <circle cx="270" cy="48" r="9" class="d-box"/><circle cx="270" cy="88" r="9" class="d-box"/><circle cx="270" cy="128" r="9" class="d-l"/><circle cx="270" cy="168" r="9" class="d-box"/>
+    <circle cx="410" cy="48" r="9" class="d-box"/><circle cx="410" cy="88" r="9" class="d-box"/><circle cx="410" cy="128" r="9" class="d-l"/><circle cx="410" cy="168" r="9" class="d-box"/>
+    <circle cx="550" cy="48" r="9" class="d-box"/><circle cx="550" cy="88" r="9" class="d-box"/><circle cx="550" cy="128" r="9" class="d-l"/><circle cx="550" cy="168" r="9" class="d-box"/>
+    <circle cx="690" cy="48" r="9" class="d-box"/><circle cx="690" cy="88" r="9" class="d-l"/><circle cx="690" cy="128" r="9" class="d-box"/><circle cx="690" cy="168" r="9" class="d-box"/>
+  </g>
+  <text x="380" y="20" text-anchor="middle" class="d-muted" font-size="12">每个圆 = 发射分数 E[t, 标签]；每条连线 = 转移分数 T[前, 后]；橙色 = Viterbi 选出的路径</text>
+</svg>
+<figcaption>线性 head 给每个词每个标签一个分数（发射分数）。CRF 再加上相邻两个标签之间的转移分数，在整条序列上取最优。</figcaption>
+</figure>
+
+<p>一条标签序列 <var>y</var> 的总分，以及它的概率：</p>
+<div class="math"><var>s</var>(<var>x</var>, <var>y</var>) = <var>S</var>[<var>y</var><sub>1</sub>] + Σ<sub><var>t</var></sub> <var>E</var>[<var>t</var>, <var>y<sub>t</sub></var>] + Σ<sub><var>t</var>&gt;1</sub> <var>T</var>[<var>y</var><sub><var>t</var>−1</sub>, <var>y<sub>t</sub></var>] + <var>Z</var>[<var>y<sub>n</sub></var>]　　<var>p</var>(<var>y</var> | <var>x</var>) = exp <var>s</var>(<var>x</var>, <var>y</var>) / Σ<sub><var>y</var>′</sub> exp <var>s</var>(<var>x</var>, <var>y</var>′)</div>
+<p>训练时最大化金标序列的对数概率，分母用前向算法求。预测时用 Viterbi 取总分最高的序列。每个词的置信度，则用前向-后向算法算出的<strong>边际概率</strong> <var>p</var>(<var>y<sub>t</sub></var> = <var>k</var> | <var>x</var>)，它考虑了整条序列，和局部 softmax 不是一回事。</p>
+<pre class="code"><code>def _log_z(self, em, mask):                          # 前向算法：所有标签序列的总分（log 域）
+    alpha = self.start + em[:, 0]
+    for t in range(1, em.shape[1]):
+        nxt = torch.logsumexp(alpha.unsqueeze(2) + self.trans + em[:, t].unsqueeze(1), dim=1)
+        alpha = torch.where(mask[:, t:t + 1], nxt, alpha)   # 填充位置不更新
+    return torch.logsumexp(alpha + self.end, -1)
+
+def loss(self, x, mask, y, boxes):
+    em = self(x)                                       # 发射分数 = 线性 head 的输出
+    return (self._log_z(em, mask) - self._gold(em, y, mask)).sum() / mask.sum()</code></pre>
+
+<h2><span class="sec">§1</span>加不加 CRF</h2>
+<div class="out"><div class="out-head"><span>python ch04_crf.py · §1</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear（无 CRF）              宏F1 0.679±0.005  Q 0.731  A 0.748  H 0.558  实体全对 0.712  ECE 0.011
+  linear + CRF               宏F1 0.695±0.007  Q 0.747  A 0.765  H 0.572  <span class="hl">实体全对 0.776</span>  ECE 0.033
+  训练轮数：[15, 24, 15]，每个种子训练 19 s（无 CRF 的线性 7 s）</pre></div>
+<div class="chart" id="chart-crf">
+  <p class="chart-title">逐词宏 F1：同一个线性发射分数，有 / 无 CRF</p>
+  <p class="chart-sub">误差线是 3 个种子的标准差。横轴从 0.6 开始。</p>
+  <div class="plot"></div>
+</div>
+<p>宏 F1 涨了 1.6 个点。更明显的是实体全对率，从 0.712 涨到 0.776。CRF 让一个实体里的词更倾向于拿同一个标签，少了“一个地址三个词标对、一个词标错”这种碎裂。如果下游要的是整个字段的值，这个指标比逐词 F1 更贴近体验。</p>
+
+<h2><span class="sec">§2</span>扁平标签下，CRF 学到了什么</h2>
+<div class="out"><div class="out-head"><span>python ch04_crf.py · §2</span><b>FUNSD · 冻结 LiLT</b></div><pre>                 other  question    answer    header
+  other           0.32     -0.37     -0.39     -0.30
+  question       -0.38      0.32     -0.27     -0.33
+  answer         -0.39     -0.31      0.30     -0.29
+  header         -0.30     -0.29     -0.32      0.35
+  整行或整列加同一个常数，都会被发射分数的偏置和起止分数吸收，所以只看相对大小：
+  对角线比同行、同列的其他格子都高，意思是“倾向于连续同标签”。</pre></div>
+<div id="trans-crf"></div>
+<p>学到的东西很简单：对角线约 +0.3，其余约 −0.3，就是“下一个词倾向于沿用上一个词的标签”。它没有学出“question 后面跟 answer”这种有方向的偏好。原因可能有两个。一是几何阅读顺序会把两栏交错，question→answer 的转移在序列里并不稳定。二是扁平标签里也没有 B/I 这类结构约束可学。用 BIO 标签时，CRF 能学到“I-X 前面只能是 B-X 或 I-X”这样的硬约束，扁平标签里没有这层结构。</p>
+
+<h2><span class="sec">§3</span>置信度：局部 softmax vs CRF 边际概率</h2>
+<div class="out"><div class="out-head"><span>python ch04_crf.py · §3</span><b>FUNSD · 冻结 LiLT</b></div><pre>  softmax（线性）：ECE 0.013
+     (0.00, 0.50]   1322 个词  平均置信度 0.437  实际准确率 0.445
+     (0.50, 0.70]   2664 个词  平均置信度 0.597  实际准确率 0.587
+     (0.70, 0.90]   3072 个词  平均置信度 0.806  实际准确率 0.785
+     (0.90, 0.97]   1306 个词  平均置信度 0.935  实际准确率 0.938
+     (0.97, 1.00]    343 个词  平均置信度 0.982  实际准确率 0.983
+  CRF 边际：ECE 0.028
+     (0.00, 0.50]   1486 个词  平均置信度 0.416  实际准确率 0.497
+     (0.50, 0.70]   2491 个词  平均置信度 0.603  实际准确率 0.629
+     (0.70, 0.90]   3159 个词  平均置信度 0.806  实际准确率 0.800
+     (0.90, 0.97]   1317 个词  平均置信度 0.933  实际准确率 0.926
+     (0.97, 1.00]    254 个词  平均置信度 0.980  实际准确率 0.988</pre></div>
+<div class="chart" id="chart-rel2">
+  <p class="chart-title">可靠性图：两种置信度</p>
+  <p class="chart-sub">测试集，种子 2。越贴近虚线越可信。</p>
+  <div class="plot"></div>
+</div>
+<p>两种置信度都还算可信（ECE 0.013 和 0.028）。CRF 边际在低置信区间偏保守：平均说 0.42，实际对了 0.50。也就是说，同样设一个“低于 0.5 送人工”的阈值，CRF 会多送一些其实标对了的词。阈值要按 head 分别在 dev 上定。</p>
+
+<h2><span class="sec">§4</span>成本与工程</h2>
+<div class="out"><div class="out-head"><span>python ch04_crf.py · §4</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear + CRF 参数 3,868（比线性多 24 个：转移 4×4 + 起始 4 + 结束 4）
+  linear                 n=64:   0.02  n=128:   0.03  n=256:   0.05  n=512:   0.08   (p50, ms)
+  linear + CRF           n=64:   1.41  n=128:   2.80  n=256:   5.54  n=512:  12.01   (p50, ms)
+  CRF 的预测 = Viterbi + 前向-后向（为了给每个词一个边际概率），两者都是沿序列的逐步循环。</pre></div>
+<div class="chart" id="chart-lat-crf">
+  <p class="chart-title">单线程延迟：线性 vs 线性 + CRF</p>
+  <p class="chart-sub">两轴都是对数。CRF 的预测包含 Viterbi 和前向-后向。</p>
+  <div class="plot"></div>
+</div>
+<ul>
+  <li><strong>参数几乎不变</strong>：多 24 个数。文件大小和线性 head 一样。</li>
+  <li><strong>延迟涨了两个数量级</strong>：这份实现是 Python 逐步循环，256 个词要几毫秒。复杂度是 <var>O</var>(<var>n</var>·<var>K</var>²)，<var>K</var>=4 时计算量本身很小，慢主要慢在循环开销上，换成编译实现会快很多。即便不优化，256 个词的 5.5 ms 也只是 backbone 单线程时间的约 1.4%。</li>
+  <li><strong>导出要多费事</strong>：Viterbi 和前向-后向是沿序列的动态循环，导出 ONNX 一类格式时要用循环算子或者脚本化。本课没有实测导出。</li>
+  <li><strong>可组合</strong>：CRF 只要求每个词有一组分数、词有先后顺序。所以它也能加在 BiLSTM、树模型、原型法的输出上（取 log 概率当发射分数）。</li>
+</ul>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>CRF 是解码变量，不是独立的 head。和同一个发射 head 做有 / 无对照才有意义。</li>
+    <li>FUNSD 上，线性 + CRF 的宏 F1 高 1.6 个点，实体全对率高 6.4 个点，参数只多 24 个。</li>
+    <li>扁平标签下，CRF 只学到“连续同标签”这一条。BIO 那种结构约束，扁平标签里没有。</li>
+    <li>边际概率可以当置信度用，校准还行。代价是逐步循环的延迟和导出复杂度。</li>
+  </ol>
+</section>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

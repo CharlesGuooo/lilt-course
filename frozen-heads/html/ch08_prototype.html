@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 8 章 · 原型与相似度 — 冻结 LiLT 上的 head</title>
+<meta name="description" content="类均值原型、kNN、ProtoNER 式多原型在冻结 LiLT 特征上的效果；存储与延迟；少样本曲线；新增字段时原型法还有没有优势。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch08_prototype.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="kicker">第 08 章</div>
+<h1>原型与相似度</h1>
+<p class="lede">前面的 head 都要用梯度训练。原型法换了个思路：每个字段存几个代表向量（原型），新来的词和谁最像就归谁。吸引人的地方在于新增字段：理论上只要标几个例子、算一个新原型，不用重训。问题是，这套思路在文献里成立的前提，是编码器为任务训练过。冻结的 LiLT 没有。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch08_prototype.py"><code>code/ch08_prototype.py</code></a></span>
+</div>
+
+<h2><span class="sec">§1</span>文献里的原型法，编码器都训练过</h2>
+<ul>
+  <li><span class="ev paper">论文</span> <strong>原型网络</strong>（Snell 等 2017）：原型 = 这一类支持样本嵌入的平均；预测时按到各原型的平方欧氏距离做 softmax。嵌入网络是用元学习训练出来的。</li>
+  <li><span class="ev paper">论文</span> <strong>NNShot / StructShot</strong>（Yang 和 Katiyar 2020）：先在源领域把 BERT 微调成 NER 模型，再把它当固定的特征抽取器；目标领域的少量样本只用作最近邻的“记忆”，不再训练。StructShot 再加一个用抽象转移概率的 Viterbi。论文里有一个对照特别值得注意：直接用<strong>没在任何 NER 数据上微调过</strong>的 BERT 做最近邻（SimBERT），比 NNShot 差 20 ~ 35 个 F1。</li>
+  <li><span class="ev paper">论文</span> <strong>ProtoNER</strong>（2023）：建立在 LayoutLMv2 上。训练时编码器和分类层一起训练，最后一轮把“被判对的词”的最后一层向量按类存成多个原型；推理时丢掉分类层，用余弦相似度做 K 近邻投票。新增字段时，分类层扩成 N+J 维，丢掉旧的 Other 原型（旧 Other 里可能混着新字段），然后用约 30 份新样本把<strong>编码器连同分类层一起</strong>再微调，旧类用“向原型靠拢”的余弦损失防遗忘。没找到公开代码。</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 190" role="img" aria-label="ProtoNER 的三个阶段：基础训练存原型、推理用 K 近邻、增量阶段仍然更新编码器">
+  <defs><marker id="a8" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker></defs>
+  <g font-size="12.5" class="d-text" text-anchor="middle">
+    <rect x="10" y="30" width="230" height="120" rx="10" class="d-box"/>
+    <text x="125" y="54" font-weight="600">① 基础训练</text>
+    <text x="125" y="80">编码器 + 分类层一起训练</text>
+    <text x="125" y="102">最后一轮：判对的词</text>
+    <text x="125" y="122">→ 按类存成原型</text>
+    <rect x="265" y="30" width="230" height="120" rx="10" class="d-box"/>
+    <text x="380" y="54" font-weight="600">② 推理</text>
+    <text x="380" y="80">丢掉分类层</text>
+    <text x="380" y="102">和所有原型算余弦相似度</text>
+    <text x="380" y="122">K 近邻投票</text>
+    <rect x="520" y="30" width="230" height="120" rx="10" class="d-l"/>
+    <text x="635" y="54" font-weight="600">③ 新增 J 个字段</text>
+    <text x="635" y="80">分类层扩成 N+J，丢掉旧 Other 原型</text>
+    <text x="635" y="102">约 30 份新样本，<tspan font-weight="600">编码器一起微调</tspan></text>
+    <text x="635" y="122">旧类：向原型靠拢的余弦损失</text>
+  </g>
+  <path d="M240,90 H263" class="d-arrow" marker-end="url(#a8)"/>
+  <path d="M495,90 H518" class="d-arrow" marker-end="url(#a8)"/>
+  <text x="380" y="178" text-anchor="middle" class="d-muted" font-size="12">橙色这一步要更新编码器，和“backbone 冻结”的前提有冲突</text>
+</svg>
+<figcaption>ProtoNER 的增量能力建立在“编码器还能动”之上。冻结 LiLT 时，第 ③ 步只能动 head。</figcaption>
+</figure>
+
+<p>所以这一章要回答的是：<strong>编码器冻结、只靠原始 LiLT 特征时</strong>，原型法还剩多少？我们测三种：</p>
+<ul>
+  <li><strong>NCM（类均值）</strong>：每类一个原型，取这一类所有词（单位化后）的均值。预测时找余弦最近的原型，再用 dev 上选出的温度把相似度变成概率。单位向量上，平方欧氏距离等于 2 − 2·余弦，所以和原型网络的距离排序一致。</li>
+  <li><strong>kNN</strong>：把训练集里 1.7 万个词的向量都存下来，找余弦最近的 10 个，按相似度加权投票。</li>
+  <li><strong>ProtoNER 式</strong>：先训练一个线性 head，从它判对的训练词里每类随机抽 50 个当原型，再按余弦做 5 近邻投票。</li>
+</ul>
+
+<h2><span class="sec">§2</span>效果</h2>
+<div class="out"><div class="out-head"><span>python ch08_prototype.py · §1</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear（基线）                 宏F1 0.679±0.005  Q 0.731  A 0.748  H 0.558  实体全对 0.712  ECE 0.011
+  NCM 类均值（4 个原型）             宏F1 0.440±0.000  Q 0.463  A 0.549  H 0.309  实体全对 0.428  ECE 0.027
+     温度 τ = 30（在 dev 上按负对数似然选的）
+  kNN k=10（17,449 个词）        宏F1 0.618±0.000  Q 0.634  A 0.661  H 0.558  实体全对 0.594  ECE 0.018
+  ProtoNER 式 每类 50 个原型       宏F1 0.416±0.017  Q 0.465  A 0.480  H 0.302  实体全对 0.355  ECE 0.144</pre></div>
+<div class="chart" id="chart-proto">
+  <p class="chart-title">逐词宏 F1：原型与相似度 head vs 线性基线</p>
+  <p class="chart-sub">NCM 和 kNN 没有随机性，只跑一次；ProtoNER 式是 3 个种子。横轴从 0.4 开始。</p>
+  <div class="plot"></div>
+</div>
+<p>冻结特征上，原型法明显落后：<span class="ev ours">本课实测</span> NCM 的宏 F1 只有 0.440，比线性低 24 个点；ProtoNER 式是 0.416，更低。kNN 好一些（0.618），也还低 6 个点。这和 Yang、Katiyar 的 SimBERT 对照方向一致：编码器没为任务训练过时，“和谁最像”本身就答不好。线性 head 能学出哪些维度对区分字段有用，余弦相似度却把 960 维一视同仁。</p>
+<p>置信度倒是例外：温度在 dev 上选过的 NCM 和 kNN，ECE 都很低（0.027 和 0.018）。ProtoNER 式只有 200 个原型、5 近邻投票，投票比例很粗，ECE 0.144。</p>
+
+<h2><span class="sec">§3</span>存储与延迟</h2>
+<div class="out"><div class="out-head"><span>python ch08_prototype.py · §2</span><b>FUNSD · 冻结 LiLT</b></div><pre>  NCM         存 4 个 960 维原型（fp32）                    15.0 KB
+  kNN         存全部 17,449 个训练词（fp16）              32.0 MB
+  ProtoNER 式 存 200 个原型（fp32）                        750.0 KB
+  NCM          n=64:   0.04  n=128:   0.06  n=256:   0.09  n=512:   0.18   (p50, ms)
+  kNN          n=64:   6.73  n=128:  10.57  n=256:  18.01  n=512:  32.43   (p50, ms)
+  ProtoNER 式   n=64:   0.15  n=128:   0.31  n=256:   0.60  n=512:   1.26   (p50, ms)
+  kNN 的延迟和存储都随“存了多少训练词”线性增长；新任务、新数据越多越重。</pre></div>
+<div class="chart" id="chart-lat-proto">
+  <p class="chart-title">单线程延迟：原型法 vs 线性 head</p>
+  <p class="chart-sub">两轴都是对数。kNN 要和 1.7 万个训练词逐个比。</p>
+  <div class="plot"></div>
+</div>
+<p>NCM 只存 4 个向量，15 KB，和线性 head 一个量级。kNN 要把训练词全部存下来：一个任务就是 32 MB，256 个词要 18 ms，两项都排在所有 head 的最后几名。几十个任务、每个任务几万个训练词时，kNN 的存储会超过 backbone 本身（<a href="ch09_compare.html">第 9 章</a>）。</p>
+
+<h2><span class="sec">§4</span>少样本：训练文档很少时谁掉得少</h2>
+<div class="out"><div class="out-head"><span>python ch08_prototype.py · §3</span><b>FUNSD · 冻结 LiLT</b></div><pre>      训练文档   linear      NCM      kNN
+         1    0.368    0.396    0.386
+         2    0.444    0.397    0.431
+         5    0.573    0.412    0.493
+        10    0.593    0.421    0.522
+        30    0.630    0.433    0.543
+       119    0.679    0.440    0.618
+  linear 每次都重新训练（同样的早停规则）；NCM、kNN 只是存向量，没有梯度更新。</pre></div>
+<div class="chart" id="chart-fewshot">
+  <p class="chart-title">少样本学习曲线（测试集宏 F1，3 次随机抽样取平均）</p>
+  <p class="chart-sub">横轴是训练文档数（对数轴）。linear 每次都重新训练；NCM 和 kNN 只是存向量。</p>
+  <div class="plot"></div>
+</div>
+<p>只有 1 份训练文档时，NCM 和 kNN 确实比重新训练的线性 head 好一点（0.396、0.386 对 0.368）。到 2 份文档，线性就追平了；5 份以后明显领先，而且一直在涨。NCM 在 0.44 左右封顶：在冻结特征空间里，类均值不是一个好的决策规则，数据再多也救不回来。</p>
+
+<h2><span class="sec">§5</span>新增字段：原型法的主场？</h2>
+<p>模拟一个常见场景：header 是新加的字段。旧数据里 header 没有标注，那些词都被标成了 other；新来 k 份文档，标了 header。三种做法：</p>
+<ul>
+  <li><strong>NCM</strong>：question / answer 原型用全部数据；other 和 header 原型只用新文档算（照 ProtoNER 的做法，丢掉混着 header 的旧 other）。不训练。</li>
+  <li><strong>linear，只用新文档重训</strong>：干净，但样本少。</li>
+  <li><strong>linear，旧数据 + 新文档一起训</strong>：样本多，但旧数据里的 header 词被标成了 other，标签互相矛盾。</li>
+</ul>
+<div class="out"><div class="out-head"><span>python ch08_prototype.py · §4</span><b>FUNSD · 冻结 LiLT</b></div><pre>    k  做法                                  header F1      宏F1
+    1  NCM：Q/A 用全部，other/header 只用新文档          0.362    0.466
+    1  linear：只用 k 份新文档重训                      0.264    0.416
+    1  linear：旧数据（header→other）+ 新文档           0.000    0.482
+    5  NCM：Q/A 用全部，other/header 只用新文档          0.321    0.445
+    5  linear：只用 k 份新文档重训                      0.392    0.530
+    5  linear：旧数据（header→other）+ 新文档           0.000    0.489
+   20  NCM：Q/A 用全部，other/header 只用新文档          0.318    0.437
+   20  linear：只用 k 份新文档重训                      0.504    0.628
+   20  linear：旧数据（header→other）+ 新文档           0.049    0.508
+  dev（早停、选温度）用的是带 header 的完整标注；真实场景里新字段的验证集也得一起标。</pre></div>
+<ul>
+  <li><strong>旧数据里的“缺标”是毒药</strong>：把旧数据（header 被当成 other）和新文档混在一起训，header F1 接近 0。线性 head 从上百份旧文档里学到的是“这种词是 other”，几份新文档扭不过来。新增字段时，旧数据要么补标，要么把可能含新字段的 other 词排除出训练。ProtoNER 丢掉旧的 Other 原型，也是这个道理。</li>
+  <li><strong>只有 1 份新文档时，NCM 最好</strong>：header F1 0.362，只用新文档重训的线性是 0.264。</li>
+  <li><strong>从 5 份新文档起，干净地重训线性就赢了</strong>：20 份时 header F1 0.504、宏 F1 0.628。NCM 不随文档数增长，一直在 0.32 左右。</li>
+</ul>
+<p>所以在冻结 LiLT 上，原型法“免训练加字段”的优势只在样本极少时存在，绝对效果也不高。更实用的做法是给新字段干净地标十几二十份文档，重训一个线性 head。线性 head 在全部 119 份文档上训练也只要约 7 秒。</p>
+
+<h2><span class="sec">§6</span>ProtoNER 论文里的一组数（不是本设置的预测）</h2>
+<p><span class="ev paper">论文</span> 2,742 份采购订单（73 种版式），训练 2,600、评估 142。ProtoNER 和朴素增量基线先用 2,600 份训练 4 个字段，再用 30 份新样本加 6 个字段；LayoutLMv2-10C 用 2,600 份一次训练全部 10 个字段。三者都基于 LayoutLMv2，在单张 V100 上训练，编码器都参与训练。论文没写清 F1 的具体口径，这里照录 Table 4。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>字段</th><th class="n">ProtoNER</th><th class="n">LayoutLMv2-10C</th><th class="n">朴素增量 4C→10C</th></tr></thead>
+  <tbody>
+    <tr><td>PO Number</td><td class="n">0.88</td><td class="n">0.84</td><td class="n">0.64</td></tr>
+    <tr><td>Logo Cust Name</td><td class="n">0.81</td><td class="n">0.84</td><td class="n">0.57</td></tr>
+    <tr><td>Ship To Addr</td><td class="n">0.82</td><td class="n">0.82</td><td class="n">0.43</td></tr>
+    <tr><td>Ship To Cust Name</td><td class="n">0.81</td><td class="n">0.82</td><td class="n">0.40</td></tr>
+    <tr><td>Bill To Addr</td><td class="n">0.72</td><td class="n">0.81</td><td class="n">0.44</td></tr>
+    <tr><td>Bill To Cust Name</td><td class="n">0.76</td><td class="n">0.81</td><td class="n">0.46</td></tr>
+    <tr><td>Country</td><td class="n">0.76</td><td class="n">0.83</td><td class="n">0.62</td></tr>
+    <tr><td>Currency</td><td class="n">0.78</td><td class="n">0.86</td><td class="n">0.75</td></tr>
+    <tr><td>Customer Name</td><td class="n">0.69</td><td class="n">0.75</td><td class="n">0.58</td></tr>
+    <tr><td>PO Amount</td><td class="n">0.76</td><td class="n">0.86</td><td class="n">0.62</td></tr>
+  </tbody>
+</table></div>
+<p>从表上看，只用 30 份新样本，ProtoNER 在多数字段上接近用全部数据一次训练的模型，但多半低一些，最多低 0.10；比朴素增量好得多。但这一切都建立在编码器参与微调之上，和本课“backbone 冻结”的前提不同，不能拿来预测冻结 LiLT 上原型法的表现。</p>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>文献里的原型法（原型网络、NNShot、ProtoNER）都有一个为任务训练过的编码器；冻结 LiLT 时，这个前提不成立。</li>
+    <li>冻结特征上，NCM 0.440、ProtoNER 式 0.416，比线性低 24 个点以上；kNN 0.618，但每个任务要 32 MB、18 ms。</li>
+    <li>只有 1 份标注文档时 NCM 略好；从 2 ~ 5 份起线性反超，NCM 到 0.44 就封顶。</li>
+    <li>新增字段最大的坑是旧数据缺标，混着训练 header F1 接近 0。给新字段干净地标十几二十份、重训线性，比原型法好。</li>
+  </ol>
+</section>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

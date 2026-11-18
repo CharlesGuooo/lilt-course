@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 3 章 · 序列上下文：卷积 / LSTM / 注意力 — 冻结 LiLT 上的 head</title>
+<meta name="description" content="在冻结 LiLT 特征上叠一维卷积、BiLSTM、小 Transformer：准确率、置信度、一维与二维相邻、随长度增长的 CPU 延迟。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch03_sequence.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="kicker">第 03 章</div>
+<h1>序列上下文：一维卷积、BiLSTM、小 Transformer</h1>
+<p class="lede">第 2 章的错误大多要靠上下文才能纠正：一个词是不是 answer，要看它旁边有没有 question。LiLT 内部已经有 12 层全局注意力，可它冻住了，没有为我们的标签训练过。这一章在冻结特征之上再加一层“看邻居”的结构，比较三种看法：只看左右几个词、沿着序列走一遍、所有词互相看。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch03_sequence.py"><code>code/ch03_sequence.py</code></a></span>
+  <span class="pill">head 定义 <a href="../code/heads.py"><code>code/heads.py</code></a></span>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 200" role="img" aria-label="三种序列 head 看邻居的方式：卷积看窗口，BiLSTM 双向传递，注意力两两相连">
+  <defs><marker id="a3" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker></defs>
+  <text x="125" y="22" text-anchor="middle" class="d-text" font-size="13.5" font-weight="600">一维卷积</text>
+  <text x="380" y="22" text-anchor="middle" class="d-text" font-size="13.5" font-weight="600">BiLSTM</text>
+  <text x="635" y="22" text-anchor="middle" class="d-text" font-size="13.5" font-weight="600">小 Transformer</text>
+  <g>
+    <rect x="22" y="96" width="206" height="34" rx="6" class="d-l" style="fill-opacity:.35"/>
+    <g class="d-box"><rect x="10" y="100" width="26" height="26" rx="5"/><rect x="40" y="100" width="26" height="26" rx="5"/><rect x="70" y="100" width="26" height="26" rx="5"/><rect x="100" y="100" width="26" height="26" rx="5"/><rect x="130" y="100" width="26" height="26" rx="5"/><rect x="160" y="100" width="26" height="26" rx="5"/><rect x="190" y="100" width="26" height="26" rx="5"/></g>
+    <rect x="100" y="100" width="26" height="26" rx="5" class="d-t"/>
+    <path d="M113,98 V62" class="d-arrow" marker-end="url(#a3)"/>
+    <rect x="96" y="40" width="34" height="20" rx="5" class="d-t"/>
+    <text x="125" y="156" text-anchor="middle" class="d-muted" font-size="11.5">两层 k=3，扩张 1、2</text>
+    <text x="125" y="174" text-anchor="middle" class="d-muted" font-size="11.5">感受野 1+2+4 = 7 个词</text>
+  </g>
+  <g>
+    <g class="d-box"><rect x="282" y="100" width="24" height="26" rx="5"/><rect x="330" y="100" width="24" height="26" rx="5"/><rect x="378" y="100" width="24" height="26" rx="5"/><rect x="426" y="100" width="24" height="26" rx="5"/></g>
+    <g class="d-arrow-t"><path d="M307,107 H328" marker-end="url(#a3)"/><path d="M355,107 H376" marker-end="url(#a3)"/><path d="M403,107 H424" marker-end="url(#a3)"/></g>
+    <g class="d-arrow-l"><path d="M329,119 H308" marker-end="url(#a3)"/><path d="M377,119 H356" marker-end="url(#a3)"/><path d="M425,119 H404" marker-end="url(#a3)"/></g>
+    <text x="380" y="156" text-anchor="middle" class="d-muted" font-size="11.5">从左往右、从右往左各走一遍</text>
+    <text x="380" y="174" text-anchor="middle" class="d-muted" font-size="11.5">第 t 步要等第 t−1 步算完</text>
+  </g>
+  <g>
+    <g class="d-line" style="opacity:.55"><path d="M548,113 Q591,60 634,113"/><path d="M548,113 Q612,40 676,113"/><path d="M548,113 Q634,20 720,113"/><path d="M591,113 Q634,70 676,113"/><path d="M591,113 Q656,50 720,113"/><path d="M634,113 Q677,70 720,113"/><path d="M548,113 Q570,85 591,113"/><path d="M591,113 Q612,85 634,113"/><path d="M634,113 Q655,85 676,113"/><path d="M676,113 Q698,85 720,113"/></g>
+    <g class="d-box"><rect x="535" y="100" width="26" height="26" rx="5"/><rect x="578" y="100" width="26" height="26" rx="5"/><rect x="621" y="100" width="26" height="26" rx="5"/><rect x="663" y="100" width="26" height="26" rx="5"/><rect x="707" y="100" width="26" height="26" rx="5"/></g>
+    <text x="635" y="156" text-anchor="middle" class="d-muted" font-size="11.5">每对词之间都算一次注意力</text>
+    <text x="635" y="174" text-anchor="middle" class="d-muted" font-size="11.5">n 个词 → n² 个分数</text>
+  </g>
+</svg>
+<figcaption>三者看到的都是同一份冻结特征（960 维），只在“怎么和邻居交换信息”上不同，最后都是逐词线性分类。</figcaption>
+</figure>
+
+<p>三种结构的单层计算量，<span class="ev paper">论文</span> Vaswani 等（2017）的表 1 是这样比的（<var>n</var> 是序列长度，<var>d</var> 是维度，<var>k</var> 是卷积核宽）：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>层</th><th>每层计算量</th><th>必须串行的步数</th><th>任意两词之间的最长路径</th></tr></thead>
+  <tbody>
+    <tr><td>自注意力</td><td><var>O</var>(<var>n</var>²·<var>d</var>)</td><td><var>O</var>(1)</td><td><var>O</var>(1)</td></tr>
+    <tr><td>循环（LSTM）</td><td><var>O</var>(<var>n</var>·<var>d</var>²)</td><td><var>O</var>(<var>n</var>)</td><td><var>O</var>(<var>n</var>)</td></tr>
+    <tr><td>卷积</td><td><var>O</var>(<var>k</var>·<var>n</var>·<var>d</var>²)</td><td><var>O</var>(1)</td><td><var>O</var>(log<sub><var>k</var></sub> <var>n</var>)</td></tr>
+  </tbody>
+</table></div>
+<p>这只是渐近复杂度。在一台具体的 CPU 上、具体的 <var>n</var> 和 <var>d</var> 下谁快，要实测（§3）。</p>
+
+<h2><span class="sec">§1</span>三种序列 head vs 线性基线</h2>
+<div class="out"><div class="out-head"><span>python ch03_sequence.py · §1</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear（基线）                 宏F1 0.679±0.005  Q 0.731  A 0.748  H 0.558  实体全对 0.712  ECE 0.011
+  Conv1D k3×2 d(1,2)         宏F1 0.688±0.011  Q 0.732  A 0.770  H 0.563  实体全对 0.732  ECE 0.103
+  <span class="hl">BiLSTM 1 层 2×128           宏F1 0.719±0.020</span>  Q 0.744  A 0.793  H 0.621  实体全对 0.755  ECE 0.157
+  Transformer 1 层 d256       宏F1 0.688±0.013  Q 0.732  A 0.752  H 0.581  实体全对 0.705  ECE 0.092
+  训练轮数（dev 最好的那一轮）：conv1d [8, 6, 12]；bilstm [19, 29, 10]；transformer [37, 19, 14]</pre></div>
+<div class="chart" id="chart-seq">
+  <p class="chart-title">逐词宏 F1：序列 head vs 线性基线</p>
+  <p class="chart-sub">同特征、同切分、同训练预算；误差线是 3 个种子的标准差。横轴从 0.6 开始。</p>
+  <div class="plot"></div>
+</div>
+<ul>
+  <li><strong>BiLSTM 最好</strong>，宏 F1 0.719，比线性高 4 个点，answer 和 header 涨得最多，实体全对率也最高。但它的种子间标准差也最大（±0.020）。</li>
+  <li><strong>卷积和一层 Transformer 都只高 1 个点左右</strong>，在误差范围的边上。</li>
+  <li><strong>置信度全变差了</strong>：ECE 从线性的 0.011 涨到 0.09 ~ 0.16。和第 2 章的 MLP 一样，容量更大的 head 普遍过度自信。要用它们的置信度，得先做校准（例如在 dev 上做温度缩放）。</li>
+</ul>
+<p>文献里最接近的对照是：<span class="ev paper">论文</span> BERT 论文 §5.3 在冻结 BERT 上接两层 BiLSTM，CoNLL-2003 dev F1 96.1，整体微调是 96.4；Peters 等（2019）的冻结 BERT-base 接 BiLSTM 是 92.2，微调是 92.4。这两条都说明“冻结特征 + 序列 head”能逼近微调，但都没有同条件下“冻结 + 纯线性”的对照，所以 BiLSTM 相对线性多出多少，它们给不出。本课的这组对照补的正是这一点，只是换到了 FUNSD 和 LiLT 上。</p>
+
+<h2><span class="sec">§2</span>一维相邻 vs 二维相邻</h2>
+<p>卷积 head 只看阅读顺序里左右 3 个词。表单是二维的，一维窗口里的词和页面上真正靠近的词，重合多少？配对的 question 和 answer 又在一维序列里隔多远？</p>
+<div class="out"><div class="out-head"><span>python ch03_sequence.py · §2</span><b>FUNSD · 冻结 LiLT</b></div><pre>  卷积感受野 7 个词（中心词左右各 3 个）
+  每个词在页面上最近的 6 个词里，落在阅读顺序 ±3 以内的：<span class="hl">32.2%</span>
+  FUNSD 标注的 question→answer 配对 823 对，两者在阅读顺序里的最近距离：
+    紧挨着（=1）       457 对  55.5%
+    2..3           37 对  4.5%
+    4..10         104 对  12.6%
+    &gt; 10          225 对  <span class="hl">27.3%</span>
+  ±3 以内合计 60.0%：剩下的配对，卷积 head 自己看不到，只能靠 LiLT 特征里已经带的上下文。</pre></div>
+<div class="chart" id="chart-linkdist">
+  <p class="chart-title">question → answer 配对在阅读顺序里的距离</p>
+  <p class="chart-sub">FUNSD 测试集 823 对。蓝色在卷积感受野（±3）以内，橙色在它之外。</p>
+  <div class="plot"></div>
+</div>
+<p>一半多的配对是紧挨着的，同一行里“问题: 答案”。但有 27% 隔了 10 个词以上，多半是答案在下一行，或者在另一栏里。页面上最近的 6 个词，只有 32% 落在 ±3 的一维窗口里。一维窗口和页面上的邻近，差得很远。</p>
+<div class="widget" id="w-neighbors">
+  <div class="widget-title">点一个词：一维窗口和页面近邻差多少</div>
+  <p class="widget-sub">蓝框是阅读顺序 ±k 以内的词（卷积看得到的），橙色虚线框是页面上最近的 6 个词，青色下划线是它标注的配对 answer。</p>
+  <div class="controls"><label>一维窗口 <input type="range" min="1" max="8" step="1" value="3" aria-label="一维窗口半径"></label><b class="k-out"></b></div>
+  <div class="doc-view"></div>
+  <p class="doc-note"></p>
+</div>
+<p>注意，这并不意味着卷积 head 看不到远处的配对。LiLT 的特征本身已经在 512 个 token 的范围内做过全局注意力，远处的信息早就混进每个词的向量里了。卷积只是没法<strong>再额外</strong>对远处做针对标签的组合。BiLSTM 和 Transformer 没有窗口限制，这可能是 BiLSTM 胜出的原因之一。Transformer 也没有窗口限制却没胜出，所以窗口不是全部解释。</p>
+
+<h2><span class="sec">§3</span>成本：随文档变长，谁涨得快</h2>
+<div class="out"><div class="out-head"><span>python ch03_sequence.py · §3</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear                 参数     3,844   文件     16.8 KB
+  Conv1D k3×2 d(1,2)     参数   935,428   文件   3656.7 KB
+  BiLSTM 1 层 2×128       参数 1,117,188   文件   4367.4 KB
+  Transformer 1 层 d256   参数   774,660   文件   3031.9 KB
+  linear                 n=64:   0.03  n=128:   0.03  n=256:   0.05  n=512:   0.09   (p50, ms)
+  conv1d                 n=64:   0.63  n=128:   0.81  n=256:   1.70  n=512:   2.96   (p50, ms)
+  bilstm                 n=64:   1.57  n=128:   3.07  n=256:   6.16  n=512:  12.10   (p50, ms)
+  transformer            n=64:   0.38  n=128:   0.75  n=256:   1.73  n=512:   5.08   (p50, ms)
+  n 从 64 增到 512（8 倍）时延迟涨了：linear ×3.5  conv1d ×4.7  <span class="hl">bilstm ×7.7</span>  <span class="hl">transformer ×13.3</span></pre></div>
+<div class="chart" id="chart-lat">
+  <p class="chart-title">单线程延迟随词数 n 的变化（两轴都是对数）</p>
+  <p class="chart-sub">batch=1，只算 head；虚线是线性 head。悬停看具体毫秒数。</p>
+  <div class="plot"></div>
+</div>
+<p>n 涨 8 倍时，Transformer 的延迟涨了 13 倍，平方项开始显形；BiLSTM 涨 7.7 倍，接近线性，可它的绝对值最大：256 个词要 6.2 ms，因为每一步都得等上一步。卷积介于两者之间。三者都比线性 head 慢 30 ~ 150 倍。不过放到整条链路里看，backbone 单线程一次前向是 392 ms，最慢的 BiLSTM 也不到它的 2%。</p>
+<p>真正可能变成问题的是两件事：</p>
+<ul>
+  <li><strong>文件大小</strong>：每个任务 3 ~ 4.4 MB，是线性 head 的约 200 倍。60 个任务就是两三百 MB（<a href="ch09_compare.html">第 9 章</a>算总账）。</li>
+  <li><strong>长文档</strong>：如果多页拼接让 n 远超 512，Transformer 的平方项会继续放大。</li>
+</ul>
+<p><span class="ev paper">论文</span> ID-CNN（Strubell 等 2017）报告扩张卷积比 BiLSTM-CRF 快 14 ~ 20 倍，准确率相当。那是端到端训练的通用 NER，但“卷积比循环更适合 CPU 并行”的方向和这里的实测一致。</p>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>在冻结特征上加序列上下文有用：BiLSTM 的逐词宏 F1 是 0.719，比线性高 4 个点。卷积和一层 Transformer 只高约 1 个点。</li>
+    <li>代价是置信度：三者的 ECE 都在 0.09 以上（线性是 0.011）。上线前要校准。</li>
+    <li>一维窗口和二维邻近差得远：页面上最近的 6 个词只有 32% 在 ±3 窗口里，27% 的问答配对隔了 10 个词以上。</li>
+    <li>延迟占比不到 backbone 的 2%，真正的成本在每个任务 3 ~ 4 MB 的文件，以及长文档时注意力的平方增长。</li>
+  </ol>
+</section>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

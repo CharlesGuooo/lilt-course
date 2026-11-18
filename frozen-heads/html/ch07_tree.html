@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 7 章 · 树模型 head — 冻结 LiLT 上的 head</title>
+<meta name="description" content="把每个词的冻结特征当成表格的一行喂给直方图 GBDT：效果、PCA 降维、树的数量、模型大小和单线程延迟。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch07_tree.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="kicker">第 07 章</div>
+<h1>树模型 head</h1>
+<p class="lede">树模型的吸引力在工程上：推理不依赖深度学习运行时，可以单独导出，许可证宽松（LightGBM 是 MIT，XGBoost 是 Apache-2.0）。做法也直接：每个词的 960 维向量加上 4 个框坐标，当成表格里的一行。问题在于，冻结特征是稠密的高维向量，这不是树最擅长的数据。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch07_tree.py"><code>code/ch07_tree.py</code></a></span>
+  <span class="pill">用 sklearn 的 <code>HistGradientBoostingClassifier</code></span>
+</div>
+
+<div class="callout key">
+  <span class="ct">为什么不直接用 LightGBM</span>
+  <p>sklearn 的 <code>HistGradientBoostingClassifier</code> 和 LightGBM 是同一类算法：特征先分箱成直方图，树按叶子最优优先的方式生长。它不需要额外装系统库，macOS 上的 LightGBM 则要另装 <code>libomp</code>。想换成 LightGBM，只需改一行。两者的速度和文件大小会有差别，结论的方向应该一致，但本课没有实测 LightGBM。</p>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 210" role="img" aria-label="树的轴对齐切分要用很多台阶去逼近一条斜的决策边界">
+  <g>
+    <rect x="40" y="20" width="300" height="160" rx="6" class="d-box"/>
+    <path d="M40,180 L340,20" style="stroke:var(--text);stroke-width:2.5;fill:none"/>
+    <text x="190" y="200" text-anchor="middle" class="d-text" font-size="12.5">线性 head：一条斜线就分开</text>
+  </g>
+  <g>
+    <rect x="420" y="20" width="300" height="160" rx="6" class="d-box"/>
+    <path d="M420,180 L720,20" style="stroke:var(--text);stroke-width:1.5;fill:none;stroke-dasharray:4 4;opacity:.7"/>
+    <path d="M420,170 H450 V154 H480 V138 H510 V122 H540 V106 H570 V90 H600 V74 H630 V58 H660 V42 H690 V26 H720" style="stroke:var(--layout);stroke-width:2.5;fill:none"/>
+    <text x="570" y="200" text-anchor="middle" class="d-text" font-size="12.5">树：每次只能沿一个维度切，靠台阶逼近</text>
+  </g>
+</svg>
+<figcaption>当信息分散在很多维度的线性组合里（深度表示的常态），每次只能按一个维度切一刀的树，需要很多切分才能近似一个线性 head 一步就能学到的边界。</figcaption>
+</figure>
+<p><span class="ev paper">论文</span> Grinsztajn 等（2022）在 45 个中等规模的表格数据集上发现，树模型仍普遍优于表格神经网络。他们的分析是：树对无信息特征更稳健，也擅长学不规则的函数；神经网络的优势是不依赖坐标轴方向，更容易用上“多个特征的线性组合”。那些数据集是异质的业务表格，不是编码器输出的稠密向量，结论不能直接搬过来。但他们对两者归纳偏置的刻画，正好提示了树在 960 维稠密特征上可能吃亏。这一点是推断，要实测。</p>
+
+<h2><span class="sec">§1</span>直方图 GBDT 读 960 维特征 + 词框</h2>
+<pre class="code"><code>clf = HistGradientBoostingClassifier(max_iter=500, learning_rate=0.1, max_leaf_nodes=31,
+                                     early_stopping=True, n_iter_no_change=20, random_state=0)
+clf.fit(Xtr, ytr, X_val=Xdv, y_val=ydv)        # 早停用我们自己的 dev 文档，不在词上随机切</code></pre>
+<div class="out"><div class="out-head"><span>python ch07_tree.py · §1</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear（基线）                 宏F1 0.679±0.005  Q 0.731  A 0.748  H 0.558  实体全对 0.712  ECE 0.011
+  GBDT · 964 维               宏F1 0.668±0.000  Q 0.718  A 0.739  H 0.548  实体全对 0.701  ECE 0.048
+  964 个特征，107 轮 × 4 类 = 428 棵树、26,108 个节点，训练 38 s（8 核全开）</pre></div>
+<p>比线性 head 低 1.1 个点，ECE 0.048 也不如线性。为了拿到这个分数，它长了 428 棵树（107 轮 × 4 类，多分类时每一轮每类一棵）。早停用的是我们自己切出的 dev 文档。如果在词级别随机切验证集，同一份文档的词会同时落进训练和验证，早停就会过于乐观。</p>
+
+<h2><span class="sec">§2</span>先降维再喂树</h2>
+<div class="out"><div class="out-head"><span>python ch07_tree.py · §2</span><b>FUNSD · 冻结 LiLT</b></div><pre>  64 个主成分保留了 78.8% 的方差
+  GBDT · PCA64 + 4           宏F1 0.629±0.000  Q 0.673  A 0.675  H 0.539  实体全对 0.633  ECE 0.040
+  68 个特征，88 轮 → 352 棵树、21,472 个节点，训练 5 s</pre></div>
+<p>PCA 到 64 维以后，训练从 38 s 降到 5 s，树也少了，但宏 F1 掉到 0.629，比线性低 5 个点。64 个主成分只保留了 79% 的方差，剩下的 21% 里有不少分类要用的信息。降维救不了树。</p>
+
+<h2><span class="sec">§3</span>大小与延迟</h2>
+<div class="out"><div class="out-head"><span>python ch07_tree.py · §3</span><b>FUNSD · 冻结 LiLT</b></div><pre>  GBDT · 964 维       模型文件   3437.2 KB（pickle，PCA 版含投影矩阵）
+  GBDT · PCA64 + 4   模型文件   1607.2 KB（pickle，PCA 版含投影矩阵）
+  GBDT · 964 维       n=64:   3.63  n=128:   5.41  <span class="hl">n=256:  10.42</span>  n=512:  20.75   (p50, ms)
+  GBDT · PCA64 + 4   n=64:   2.35  n=128:   3.53  n=256:   5.98  n=512:  10.32   (p50, ms)
+  PCA 版的计时不含投影（n×960 乘 960×64 的一次矩阵乘，本身很快）。
+  对照：960 维线性 head 的文件约 16 KB，见第 2 章。</pre></div>
+<div class="chart" id="chart-lat-tree">
+  <p class="chart-title">单线程延迟：树模型 vs 线性 head</p>
+  <p class="chart-sub">两轴都是对数；树的“一份文档”= n 行一起预测。</p>
+  <div class="plot"></div>
+</div>
+<p>这是本章最出乎意料的地方：<span class="ev ours">本课实测</span> 树模型 head 一点也不轻。3.4 MB 的文件，是线性 head 的 200 倍；一份 256 词的文档单线程要 10 ms，比第 3 章的 BiLSTM 还慢。每个词要走 428 棵树，每棵树都是一串依赖数据的分支跳转，CPU 上很难向量化。树模型“小而快”的直觉，来自低维的表格特征。到了 960 维的稠密向量上，这个直觉不成立。</p>
+<p>工程上的那些优势仍然在：<span class="ev paper">文档</span> onnxmltools 声明支持把 LightGBM、XGBoost 转成 ONNX，推理可以完全脱离 PyTorch。但这条导出链路本课没有实测，sklearn 的 HistGradientBoosting 能不能导出也没有核实。</p>
+<p>文档抽取里“工程特征 + 经典分类器”的路线确实有人在生产中用过：<span class="ev paper">论文</span> CloudScan（ICDAR 2017）在 32.6 万张发票、8 个字段上，用逻辑回归作生产基线，已见版式 F1 0.887、未见版式 0.788；RNN 分别是 0.891 和 0.840。但那是线性模型，不是树，而且读的是人工特征，不是冻结的深度特征。</p>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>直方图 GBDT 读冻结特征，宏 F1 0.668，略低于线性（0.679）；PCA 到 64 维掉到 0.629。</li>
+    <li>它不轻：428 棵树，3.4 MB，单线程 10 ms / 256 词，比 BiLSTM 还慢。</li>
+    <li>它的价值在部署约束上：不依赖深度学习运行时，许可证宽松，可以单独导出。只有遇到“必须脱离 PyTorch”这类硬约束时，才值得考虑。</li>
+    <li>文献里没有找到树模型读冻结文档编码器特征的直接实验。这一章的数字是第一手的，但只代表 FUNSD。</li>
+  </ol>
+</section>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

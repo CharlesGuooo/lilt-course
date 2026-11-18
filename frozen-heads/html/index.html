@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>冻结 LiLT 上的轻量 head</title>
+<meta name="description" content="LiLT 冻结成共享 backbone 后，每个任务的抽取 head 怎么选：八类 head 在 FUNSD 上的同条件实测，含准确率、置信度、文件大小和 CPU 延迟。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="index.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="hero">
+<div class="kicker">LiLT 架构课 · 续篇</div>
+<h1>冻结 LiLT 上的轻量 head</h1>
+<p class="lede">把 LiLT 冻结成所有任务共享的特征抽取器以后，每个任务的 head 该用什么结构？这门课把八类候选放在同样的条件下比较：同一份冻结特征、同一份 FUNSD 切分、同一套扁平标签、同一台 CPU。页面上的每个数字都来自 <a href="../code/README.md"><code>code/</code></a> 里可以重跑的脚本。</p>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="总览：OCR 词和框进入冻结的 LiLT，得到逐词特征，再交给八类 head 之一，输出每个词的字段和置信度">
+  <defs><marker id="ai" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker></defs>
+  <rect x="8" y="98" width="92" height="54" rx="8" class="d-box"/>
+  <text x="54" y="121" text-anchor="middle" class="d-text" font-size="12.5">OCR</text>
+  <text x="54" y="139" text-anchor="middle" class="d-mono" font-size="11">词 + 框</text>
+  <path d="M100,125 H120" class="d-arrow" marker-end="url(#ai)"/>
+  <rect x="122" y="84" width="112" height="82" rx="10" style="fill:var(--surface);stroke:var(--axis);stroke-width:1.5"/>
+  <rect x="132" y="96" width="58" height="58" rx="6" class="d-t"/><rect x="194" y="96" width="30" height="58" rx="6" class="d-l"/>
+  <text x="161" y="130" text-anchor="middle" class="d-mono" font-size="11">768</text><text x="209" y="130" text-anchor="middle" class="d-mono" font-size="10">192</text>
+  <text x="178" y="76" text-anchor="middle" class="d-text" font-size="12.5" font-weight="600">LiLT（冻结）</text>
+  <text x="178" y="184" text-anchor="middle" class="d-muted" font-size="11">一次前向，所有任务共享</text>
+  <path d="M234,125 H254" class="d-arrow" marker-end="url(#ai)"/>
+  <rect x="256" y="98" width="96" height="54" rx="8" class="d-box"/>
+  <text x="304" y="121" text-anchor="middle" class="d-text" font-size="12.5">逐词特征</text>
+  <text x="304" y="139" text-anchor="middle" class="d-mono" font-size="11">[n, 960]</text>
+  <path d="M352,125 H372" class="d-arrow" marker-end="url(#ai)"/>
+  <g font-size="11.5" class="d-text" text-anchor="middle">
+    <rect x="374" y="14" width="124" height="40" rx="7" class="d-box"/><text x="436" y="32">线性 / MLP</text><text x="436" y="47" class="d-muted" font-size="10.5">第 2 章</text>
+    <rect x="506" y="14" width="124" height="40" rx="7" class="d-box"/><text x="568" y="32">卷积 / LSTM / 注意力</text><text x="568" y="47" class="d-muted" font-size="10.5">第 3 章</text>
+    <rect x="374" y="62" width="124" height="40" rx="7" class="d-box"/><text x="436" y="80">+ CRF 解码</text><text x="436" y="95" class="d-muted" font-size="10.5">第 4 章</text>
+    <rect x="506" y="62" width="124" height="40" rx="7" class="d-box"/><text x="568" y="80">版面感知</text><text x="568" y="95" class="d-muted" font-size="10.5">第 5 章</text>
+    <rect x="374" y="110" width="124" height="40" rx="7" class="d-box"/><text x="436" y="128">片段 / biaffine</text><text x="436" y="143" class="d-muted" font-size="10.5">第 6 章</text>
+    <rect x="506" y="110" width="124" height="40" rx="7" class="d-box"/><text x="568" y="128">树模型</text><text x="568" y="143" class="d-muted" font-size="10.5">第 7 章</text>
+    <rect x="374" y="158" width="124" height="40" rx="7" class="d-box"/><text x="436" y="176">原型 / 相似度</text><text x="436" y="191" class="d-muted" font-size="10.5">第 8 章</text>
+    <rect x="506" y="158" width="124" height="40" rx="7" class="d-box"/><text x="568" y="176">横向对比</text><text x="568" y="191" class="d-muted" font-size="10.5">第 9 章</text>
+  </g>
+  <path d="M630,125 H650" class="d-arrow" marker-end="url(#ai)"/>
+  <rect x="652" y="92" width="100" height="66" rx="8" class="d-box"/>
+  <text x="702" y="116" text-anchor="middle" class="d-text" font-size="12.5">每个词</text>
+  <text x="702" y="134" text-anchor="middle" class="d-mono" font-size="11">字段 + 置信度</text>
+  <text x="436" y="228" text-anchor="middle" class="d-muted" font-size="11.5">每个任务一个 head；backbone 不动</text>
+</svg>
+<figcaption>backbone 冻结、只算一次；换任务只换 head。这门课比较的就是右边这一列。</figcaption>
+</figure>
+
+<h2>先说结论（FUNSD 上）</h2>
+<ol>
+  <li><strong>冻结 LiLT + 线性 head 已经是像样的基线</strong>：逐词宏 F1 0.679，置信度几乎完美校准（ECE 0.011），文件 17 KB，延迟 0.04 ms。backbone 应该吐 960 维（文本 + layout），只用 HF 默认的 768 维低 2.2 个点。</li>
+  <li><strong>上下文有用，但增益有限</strong>：BiLSTM 最多，+4.0 个点；CRF +1.6 个点，实体全对率 +6.4 个点，几乎不加参数。卷积、一层 Transformer、二维相对位置偏置都在 1 个点上下。</li>
+  <li><strong>复杂的 head 会把置信度弄坏</strong>：带隐藏层的 head，ECE 在 0.07 ~ 0.33 之间。要用置信度定复核阈值，得先校准。</li>
+  <li><strong>片段、树、原型在冻结特征上不划算</strong>：片段 head 低 10 个点，还是最慢的；树模型略低于线性，却要 3.4 MB、10 ms；类均值原型低 24 个点，kNN 每个任务要 32 MB。</li>
+  <li><strong>扁平标签本身是天花板</strong>：标签全对时，按“连续同标签合并”还原出的实体级 F1 也只有 0.574。要字段级完整值，先补实例边界的标注，再谈换 head。</li>
+</ol>
+<p>以上都是 FUNSD 上的结果，换成你的数据要重测。完整的对照表和验证步骤在<a href="ch09_compare.html">第 9 章</a>。</p>
+
+<h2>章节</h2>
+<div class="cards">
+  <a class="card" href="ch00_problem.html"><span class="c-num">第 00 章</span><div class="c-title">问题与证据规则</div><div class="c-q">要解决什么、backbone 和 head 之间传什么、什么数字才算证据？</div><span class="c-file">没有脚本</span></a>
+  <a class="card" href="ch01_testbed.html"><span class="c-num">第 01 章</span><div class="c-title">实验台：冻结特征与 FUNSD</div><div class="c-q">扁平标签、几何阅读顺序、连续同标签 ≠ 同一实例、窗口、指标。</div><span class="c-file">ch01_testbed.py</span></a>
+  <a class="card" href="ch02_linear.html"><span class="c-num">第 02 章</span><div class="c-title">基线：线性层与小 MLP</div><div class="c-q">768 还是 960？MLP 多 1 个点，置信度却坏了。</div><span class="c-file">ch02_linear_mlp.py</span></a>
+  <a class="card" href="ch03_sequence.html"><span class="c-num">第 03 章</span><div class="c-title">序列上下文</div><div class="c-q">卷积、BiLSTM、小 Transformer：一维相邻和页面相邻差多少？</div><span class="c-file">ch03_sequence.py</span></a>
+  <a class="card" href="ch04_crf.html"><span class="c-num">第 04 章</span><div class="c-title">解码层：CRF</div><div class="c-q">扁平标签下 CRF 学到什么？边际概率能当置信度吗？</div><span class="c-file">ch04_crf.py</span></a>
+  <a class="card" href="ch05_layout.html"><span class="c-num">第 05 章</span><div class="c-title">版面感知 head</div><div class="c-q">图、网格、二维相对位置：显式再给一次坐标有用吗？</div><span class="c-file">ch05_layout.py</span></a>
+  <a class="card" href="ch06_span.html"><span class="c-num">第 06 章</span><div class="c-title">片段与 biaffine</div><div class="c-q">扁平 tag 能派生片段目标吗？实体级指标的上限是多少？</div><span class="c-file">ch06_span.py</span></a>
+  <a class="card" href="ch07_tree.html"><span class="c-num">第 07 章</span><div class="c-title">树模型 head</div><div class="c-q">960 维稠密特征上，树还“小而快”吗？</div><span class="c-file">ch07_tree.py</span></a>
+  <a class="card" href="ch08_prototype.html"><span class="c-num">第 08 章</span><div class="c-title">原型与相似度</div><div class="c-q">不训练就加新字段？冻结 backbone 时还灵吗？</div><span class="c-file">ch08_prototype.py</span></a>
+  <a class="card" href="ch09_compare.html"><span class="c-num">第 09 章</span><div class="c-title">横向对比与验证方案</div><div class="c-q">同一张表、多任务总账、换到自己的数据上该怎么测。</div><span class="c-file">ch09_compare.py</span></a>
+</div>
+
+<h2>怎么读</h2>
+<ul>
+  <li>每个结论都标了出处：<span class="ev ours">本课实测</span> 是 <code>code/</code> 里的脚本在 FUNSD 上跑出来的；<span class="ev paper">论文</span> 是引用的文献，只代表它们自己的设置；<span class="ev infer">推断</span> 是从结构或复杂度推出来的，还没被测过。</li>
+  <li>黑底的输出框是脚本的原样输出，标题写着来自哪个脚本的哪一节。</li>
+  <li>标着“试一试”的组件可以点、可以拖。图表悬停能看到具体数值，下面一般有“查看数据表”。</li>
+  <li>没读过 LiLT 本身的结构，可以先看 <a href="../../html/index.html">LiLT 架构课</a>，尤其是第 6 章（任务头）和第 7 章（冻结 backbone）。</li>
+</ul>
+
+<h2>数据与致谢</h2>
+<ul>
+  <li>实验数据是 FUNSD（Jaume 等，2019），只允许非商业的研究和教学用途，原始图像来自 RVL-CDIP。本课不分发数据集，交互组件里用到一份测试表单的词、框和标签。</li>
+  <li>backbone 是 <code>SCUT-DLVCLab/lilt-roberta-en-base</code>；论文与官方实现见 <a href="https://github.com/jpWang/LiLT">jpWang/LiLT</a>。</li>
+  <li>引用的论文按章列在<a href="ch09_compare.html#refs">第 9 章末尾</a>。</li>
+</ul>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 2 章 · 基线：线性层与小 MLP — 冻结 LiLT 上的 head</title>
+<meta name="description" content="冻结 LiLT 特征上的逐词线性 head：四种输出契约、线性 vs MLP、置信度校准、混淆矩阵与成本。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch02_linear.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="kicker">第 02 章</div>
+<h1>基线：逐词线性层与小 MLP</h1>
+<p class="lede">最简单的 head 就是每个词一个线性分类器。它回答一个最基本的问题：冻结 LiLT 的特征本身，已经能把字段分开到什么程度。后面每一类更复杂的 head，增益都要相对这条基线、在同一设置下算。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch02_linear_mlp.py"><code>code/ch02_linear_mlp.py</code></a></span>
+  <span class="pill">head 定义 <a href="../code/heads.py"><code>code/heads.py</code></a></span>
+</div>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 170" role="img" aria-label="线性 head 与小 MLP 的结构">
+  <defs><marker id="a2" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker></defs>
+  <rect x="14" y="56" width="132" height="58" rx="8" class="d-box"/>
+  <text x="80" y="80" text-anchor="middle" class="d-text" font-size="12.5">冻结特征</text>
+  <text x="80" y="99" text-anchor="middle" class="d-mono" font-size="11">[n, 960]</text>
+  <path d="M146,70 C176,70 176,40 206,40" class="d-arrow" marker-end="url(#a2)"/>
+  <path d="M146,100 C176,100 176,130 206,130" class="d-arrow" marker-end="url(#a2)"/>
+  <text x="196" y="22" class="d-text" font-size="12.5" font-weight="600">线性</text>
+  <rect x="208" y="24" width="96" height="32" rx="6" class="d-box"/><text x="256" y="45" text-anchor="middle" class="d-mono" font-size="11">Dropout 0.1</text>
+  <path d="M304,40 H330" class="d-arrow" marker-end="url(#a2)"/>
+  <rect x="332" y="24" width="120" height="32" rx="6" class="d-t"/><text x="392" y="45" text-anchor="middle" class="d-mono" font-size="11">Linear 960→4</text>
+  <path d="M452,40 H560" class="d-arrow" marker-end="url(#a2)"/>
+  <text x="196" y="112" class="d-text" font-size="12.5" font-weight="600">小 MLP</text>
+  <rect x="208" y="114" width="96" height="32" rx="6" class="d-box"/><text x="256" y="135" text-anchor="middle" class="d-mono" font-size="11">Dropout 0.1</text>
+  <path d="M304,130 H318" class="d-arrow" marker-end="url(#a2)"/>
+  <rect x="320" y="114" width="120" height="32" rx="6" class="d-t"/><text x="380" y="135" text-anchor="middle" class="d-mono" font-size="11">Linear 960→256</text>
+  <path d="M440,130 H454" class="d-arrow" marker-end="url(#a2)"/>
+  <rect x="456" y="114" width="44" height="32" rx="6" class="d-box"/><text x="478" y="135" text-anchor="middle" class="d-mono" font-size="11">GELU</text>
+  <path d="M500,130 H514" class="d-arrow" marker-end="url(#a2)"/>
+  <rect x="516" y="114" width="44" height="32" rx="6" class="d-box"/><text x="538" y="135" text-anchor="middle" class="d-mono" font-size="10.5">256→4</text>
+  <path d="M560,130 C580,130 580,86 598,86" class="d-arrow" marker-end="url(#a2)"/>
+  <path d="M560,40 C580,40 580,80 598,80" class="d-arrow"/>
+  <rect x="600" y="58" width="146" height="54" rx="8" class="d-box"/>
+  <text x="673" y="80" text-anchor="middle" class="d-text" font-size="12.5">softmax → 标签</text>
+  <text x="673" y="99" text-anchor="middle" class="d-mono" font-size="11">conf = 最大概率</text>
+</svg>
+<figcaption>每个词独立分类，词与词之间不交换信息。线性版的参数量是 960 × 4 + 4 = 3,844；MLP 多一层 256 维隐藏层。</figcaption>
+</figure>
+
+<h2><span class="sec">§1</span>同一个线性 head，四种输出契约</h2>
+<p>HF 的 <code>LiltForTokenClassification</code> 只用文本流最后一层（768 维）接 <code>Dropout + Linear</code>。官方仓库的 <code>LiLTRobertaLikeForTokenClassification</code> 先把文本流和 layout 流拼起来（768 + 192 = 960 维），再接一个 Linear。<span class="ev paper">代码</span> 两份实现都没有 MLP，也没有 CRF。这两种接法，加上“只用 layout 流”和“文本流最后 4 层 + layout 流”，用同一个线性 head 各跑 3 个种子：</p>
+<div class="out"><div class="out-head"><span>python ch02_linear_mlp.py · §1</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear · text 768          宏F1 0.657±0.001  Q 0.730  A 0.734  H 0.506  实体全对 0.731  ECE 0.018
+  linear · layout 192        宏F1 0.594±0.002  Q 0.583  A 0.640  H 0.560  实体全对 0.579  ECE 0.016
+  <span class="hl">linear · both 960</span>          宏F1 0.679±0.005  Q 0.731  A 0.748  H 0.558  实体全对 0.712  ECE 0.011
+  linear · last4 3264        宏F1 0.691±0.006  Q 0.750  A 0.764  H 0.560  实体全对 0.757  ECE 0.034
+  Q/A/H = question/answer/header 的逐词 F1；宏F1 = 三者平均；实体全对 = 实体里每个词都标对的比例。</pre></div>
+<div class="chart" id="chart-views">
+  <p class="chart-title">线性 head 的宏 F1：四种输出契约</p>
+  <p class="chart-sub">误差线是 3 个种子的标准差；橙色是本课默认的 both 960。横轴从 0.5 开始。悬停看传输量。</p>
+  <div class="plot"></div>
+</div>
+<ul>
+  <li><strong>只用 HF 默认的 768 维，比 960 维低 2.2 个点</strong>，header 低得最多（0.506 vs 0.558）。192 维的 layout 输出在冻结设置下有用，丢掉可惜。<span class="ev ours">本课实测</span></li>
+  <li><strong>只用 layout 流也有 0.594</strong>，header F1（0.560）甚至高于只用文本流。表单里“标题在哪儿”很大程度上是个位置问题。</li>
+  <li><strong>last4 再高 1.2 个点</strong>，代价是每个词传 3264 维，是 960 维的 3.4 倍。值不值，要看你的传输和存储预算。</li>
+</ul>
+
+<h2><span class="sec">§2</span>线性 vs 小 MLP</h2>
+<div class="out"><div class="out-head"><span>python ch02_linear_mlp.py · §2</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear · both 960          宏F1 0.679±0.005  Q 0.731  A 0.748  H 0.558  实体全对 0.712  ECE 0.011
+  MLP · both 960→256→4       宏F1 0.690±0.003  Q 0.730  A 0.755  H 0.584  实体全对 0.708  ECE 0.159</pre></div>
+<p>MLP 的宏 F1 高 1.1 个点，主要涨在 header 上。但是 ECE 从 0.011 涨到 0.159，置信度变得很不可靠（§3 解释 ECE）。参数也从 3,844 涨到 247,044。还有一点要留心：<span class="ev paper">论文</span> Hewitt 和 Liang（2019）指出，表达能力更强的探针自己就能拟合出一部分结果，准确率涨了，不一定说明特征里多了信息。MLP 的这 1 个点里，有多少来自 head 的容量，这组实验分不出来。</p>
+
+<h2><span class="sec">§3</span>置信度：softmax 最大值靠不靠谱</h2>
+<p>输出契约里要的“模型置信度”，对线性 head 来说就是 softmax 的最大概率。它准不准，可以按置信度分段来看：每段里的词，平均置信度和实际准确率差多少。ECE 就是这些差值按词数加权求和：</p>
+<div class="math">ECE = Σ<sub><var>m</var></sub> (|<var>B<sub>m</sub></var>| / <var>n</var>) · | acc(<var>B<sub>m</sub></var>) − conf(<var>B<sub>m</sub></var>) |</div>
+<div class="out"><div class="out-head"><span>python ch02_linear_mlp.py · §3</span><b>FUNSD · 冻结 LiLT</b></div><pre>  置信度 (0.00, 0.50]   1322 个词  平均置信度 0.437  实际准确率 0.445
+  置信度 (0.50, 0.70]   2664 个词  平均置信度 0.597  实际准确率 0.587
+  置信度 (0.70, 0.90]   3072 个词  平均置信度 0.806  实际准确率 0.785
+  置信度 (0.90, 0.97]   1306 个词  平均置信度 0.935  实际准确率 0.938
+  置信度 (0.97, 1.00]    343 个词  平均置信度 0.982  实际准确率 0.983
+  ECE = 0.013（越接近 0 越可信）</pre></div>
+<div class="chart" id="chart-rel">
+  <p class="chart-title">线性 head 的可靠性图（测试集，种子 2）</p>
+  <p class="chart-sub">每个点是一个置信度区间：横轴是平均置信度，纵轴是实际准确率。落在虚线上 = 说多少就是多少。</p>
+  <div class="plot"></div>
+</div>
+<p>线性 head 几乎贴着对角线，ECE 0.013：它说 0.8，大约就是 80% 的对。这对下游很重要，比如“置信度低于 0.7 的送人工复核”，这条规则只有在置信度可信时才成立。后面会看到，更复杂的 head 往往把这个性质弄丢了。另外，这是在 FUNSD 测试集上的结论。换了数据分布，校准也可能变，上线前要在自己的验证集上重新看。</p>
+
+<h2><span class="sec">§4</span>错在哪里</h2>
+<div class="out"><div class="out-head"><span>python ch02_linear_mlp.py · §4</span><b>FUNSD · 冻结 LiLT</b></div><pre>                 other  question    answer    header
+  other           1520       270       533        62
+  question         339      1879       365        71
+  answer           496       253      2530        15
+  header            39        84        56       195</pre></div>
+<div id="cm-linear"></div>
+<p style="font-size:13.5px;color:var(--muted)">每行按真值归一化：对角线是召回率，其余是被错标成哪一类。</p>
+<p>最大的两块错误都在 other 和 answer 之间：533 个 other 被标成 answer，496 个 answer 被标成 other。其次是 question 被当成 other。一个 answer 长什么样，很大程度上取决于它旁边是不是一个 question。每个词单独分类时，这份上下文只能靠 LiLT 特征里已经带的那部分。<a href="ch03_sequence.html">第 3 章</a>就测“在 head 里再看一眼邻居”能补回多少。</p>
+
+<h2><span class="sec">§5</span>成本</h2>
+<div class="out"><div class="out-head"><span>python ch02_linear_mlp.py · §5</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear · text 768      参数     3,076   文件     13.8 KB
+  linear · both 960      参数     3,844   文件     16.8 KB
+  linear · last4 3264    参数    13,060   文件     52.8 KB
+  MLP · both             参数   247,044   文件    967.3 KB
+  linear · text 768      n=64:   0.02  n=128:   0.03  n=256:   0.04  n=512:   0.07   (p50, ms)
+  linear · both 960      n=64:   0.02  n=128:   0.03  n=256:   0.04  n=512:   0.07   (p50, ms)
+  linear · last4 3264    n=64:   0.04  n=128:   0.06  n=256:   0.11  n=512:   0.25   (p50, ms)
+  MLP · both             n=64:   0.09  n=128:   0.14  n=256:   0.25  n=512:   0.46   (p50, ms)</pre></div>
+<p>线性 head 是 16.8 KB 的文件，一份 256 词的文档 0.04 ms。backbone 单线程一次前向要 392 ms，head 连它的万分之一都不到。即便是 MLP，0.25 ms 也微不足道。这一档 head 的延迟可以不算，要算的是准确率和置信度。</p>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>FUNSD 上，冻结 LiLT + 线性 head 的逐词宏 F1 是 0.679。这是后面所有 head 的对照基线。</li>
+    <li>输出契约有影响：只用 HF 默认的 768 维低 2.2 个点。我建议 backbone 服务吐 960 维（文本 + layout）。</li>
+    <li>MLP 只多 1 个点，ECE 却从 0.011 变成 0.159。要用它的置信度，得先做校准。</li>
+    <li>线性 head 的成本可以忽略（3,844 个参数，0.04 ms）。剩下的主要错误是 other 和 answer 互混，这要看上下文。</li>
+  </ol>
+</section>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

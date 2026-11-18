@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 5 章 · 版面感知 head — 冻结 LiLT 上的 head</title>
+<meta name="description" content="图网络、二维网格、二维相对位置注意力三条路线；在冻结 LiLT 上测最小的二维相对位置偏置 head，以及网格化的张量成本。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch05_layout.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="kicker">第 05 章</div>
+<h1>版面感知 head</h1>
+<p class="lede">表单是二维的。第 3 章看到，一维阅读顺序会把很多二维关系拆散。那么在 head 里显式地再用一次二维位置，有没有用？文献里这一类方法分三条路线：图网络、二维网格、二维相对位置注意力。它们大多是完整的系统，不是可以直接挂在冻结 LiLT 后面的小 head。本章先讲清楚这一点，再测其中最小的一个版本。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch05_layout.py"><code>code/ch05_layout.py</code></a></span>
+  <span class="pill">head 定义 <a href="../code/heads.py"><code>Layout2DHead</code></a></span>
+</div>
+
+<h2><span class="sec">§1</span>三条路线，三个完整系统</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>PICK（图）</th><th>BERTgrid（网格）</th><th>BROS（二维相对位置）</th></tr></thead>
+  <tbody>
+    <tr><td>做法</td><td>文本片段用 Transformer 编码，对应的图像块用 ResNet50 编码，两者相加作节点；学一个软邻接矩阵，做 1 层图卷积；最后用 BiLSTM + CRF 解码</td><td>把 BERT 倒数第二层的词向量按词框“涂”进一张 H×W×d 的网格，再用全卷积编码器-解码器做实例分割和框回归</td><td>本身就是一个预训练语言模型，把文本之间的二维相对位置编进自注意力</td></tr>
+    <tr><td>需要的输入</td><td>文本 + <strong>页面图像</strong></td><td>稠密二维网格</td><td>每个词 4 个角的坐标</td></tr>
+    <tr><td>监督</td><td>字符级 IOB</td><td>像素级分割掩码 + 实例框</td><td>由下游 head 决定</td></tr>
+    <tr><td>训练方式</td><td>全部从头联合训练（8 张 V100，30 轮）</td><td>BERT 冻结（在 70 万张无标注发票上预训练，下游不微调），只训练全卷积网络</td><td>要替换掉 LiLT，当新的 backbone</td></tr>
+    <tr><td>能不能直接挂在冻结 LiLT 后面</td><td>不能：要图像、要字符级 IOB</td><td>思路相近（冻结编码器 + 卷积），但 head 是一整张全卷积网络</td><td>不能：它本身就是 backbone</td></tr>
+  </tbody>
+</table></div>
+<p>图这条路线还有一个更轻的例子：<span class="ev paper">论文</span> Doc2Graph（Gemelli 等 2022）的节点特征是 spaCy 的静态词向量、一个在 FUNSD 上预训练的 U-Net 视觉特征和归一化坐标，再接图神经网络。它在 FUNSD 上的实体标注 F1 是 0.8225，但分类对象是金标的实体框，不是逐词，没法和本课的数字比。</p>
+<p><span class="ev paper">论文</span> 前面三个系统的效果都有据可查：PICK 在自己的数据集上有消融；BERTgrid 在 1.2 万张发票上，从 Chargrid 的 61.76% 提到 65.48%。但没有一条是“冻结 LiLT + 外挂小 head”的设置，能借鉴的只是设计思路。</p>
+
+<h2><span class="sec">§2</span>最小版本：给注意力加二维相对位置偏置</h2>
+<p>LayoutLMv2 的 spatial-aware self-attention 是在注意力分数上加三项可学的偏置：一维相对位置，以及 x、y 两个方向上的二维相对位置。偏置按注意力头区分，在各层之间共享。<span class="ev paper">论文 vs 代码</span> 论文说用的是框的左上角，HF 和官方代码实际取的是 <code>bbox[..., 0]</code> 和 <code>bbox[..., 3]</code>，也就是左边的 x 和<strong>下边</strong>的 y。分桶只写在代码里，论文没提。</p>
+<p>我们取它最核心的部分，加到第 3 章那个一层 Transformer head 上。其余一切不变，所以两者的差就是“显式二维关系”的边际贡献：</p>
+<div class="math"><var>s<sub>ij</sub></var> = <var>q<sub>i</sub></var>·<var>k<sub>j</sub></var> / √<var>d<sub>h</sub></var> + <var>b</var><sub><var>x</var></sub>[bucket(<var>cx<sub>j</sub></var> − <var>cx<sub>i</sub></var>)] + <var>b</var><sub><var>y</var></sub>[bucket(<var>cy<sub>j</sub></var> − <var>cy<sub>i</sub></var>)]</div>
+<pre class="code"><code>def rel_bucket(d, side=16):
+    """有符号对数分桶：坐标差（0..1000 单位）-> 0..30 的桶号。近处分得细，远处分得粗"""
+    b = torch.clamp(torch.floor(2 * torch.log2(1 + d.abs() / 2)), max=side - 1)
+    return (torch.sign(d) * b + side - 1).long()
+
+# AttnBlock.forward 里，rel2d=True 时多这几行
+cx = (boxes[..., 0] + boxes[..., 2]) / 2                 # 用框的中心
+dx = cx[:, None, :] - cx[:, :, None]                     # [B, n, n]：词 j 相对词 i
+bias = self.bx(rel_bucket(dx)) + self.by(rel_bucket(dy)) # 每个注意力头一张表
+s = s + bias.permute(0, 3, 1, 2)</code></pre>
+
+<h2><span class="sec">§3</span>结果：加不加二维偏置</h2>
+<div class="out"><div class="out-head"><span>python ch05_layout.py · §1</span><b>FUNSD · 冻结 LiLT</b></div><pre>  Transformer（无 2D 偏置）       宏F1 0.688±0.013  Q 0.732  A 0.752  H 0.581  实体全对 0.705  ECE 0.092
+  Transformer + 2D 偏置        宏F1 0.691±0.007  Q 0.741  A 0.734  H 0.597  实体全对 0.718  ECE 0.075
+  加偏置后逐类 F1 变化：other -0.019  question +0.009  answer -0.017  header +0.016</pre></div>
+<div class="chart" id="chart-layout">
+  <p class="chart-title">逐词宏 F1：二维相对位置偏置的消融</p>
+  <p class="chart-sub">误差线是 3 个种子的标准差。横轴从 0.6 开始。</p>
+  <div class="plot"></div>
+</div>
+<p>宏 F1 只差 0.003，比种子间的波动还小。逐类看有涨有跌：header、question 略涨，answer、other 略跌。<span class="ev ours">本课实测</span> 在 FUNSD 上，这个最小的二维偏置没有带来可测的增益。</p>
+
+<h2><span class="sec">§4</span>偏置学到了什么</h2>
+<div class="out"><div class="out-head"><span>python ch05_layout.py · §2</span><b>FUNSD · 冻结 LiLT</b></div><pre>  横向 dx：-400→-0.00  -100→+0.03  -30→+0.00  -10→-0.02  +0→-0.03  +10→+0.02  +30→+0.02  +100→+0.01  +400→-0.00
+  纵向 dy：-400→-0.02  -100→+0.02  -30→+0.03  -10→+0.01  +0→+0.00  +10→-0.06  +30→-0.01  +100→+0.03  +400→+0.02
+  坐标是 0..1000 的归一化单位；偏置为正 = 更愿意看那个方向、那个距离上的词。</pre></div>
+<div class="chart" id="chart-bias">
+  <p class="chart-title">学到的二维相对位置偏置（4 个注意力头取平均）</p>
+  <p class="chart-sub">横轴是相对距离分桶，标的是每个桶的起点（0..1000 单位）。纵轴是加到注意力分数上的偏置。</p>
+  <div class="plot"></div>
+</div>
+<p>4 个头平均后，每个桶的偏置都在 ±0.07 以内，曲线也没有清楚的形状（比如“同一行左边的词更重要”）。平均可能会抵消方向相反的头，单个头的偏置这里没有单独看。一个合理的解释是：冻结的 LiLT 特征里已经有 layout 流 12 层的版面信息，再显式给一次坐标，能补的不多。这是推断，不是证明。如果把 head 换成更深的层，或者换一套更依赖二维关系的数据（比如多栏表格），结论可能不同。</p>
+
+<h2><span class="sec">§5</span>成本</h2>
+<div class="out"><div class="out-head"><span>python ch05_layout.py · §3</span><b>FUNSD · 冻结 LiLT</b></div><pre>  Transformer 参数 774,660；加 2D 偏置后 774,908（多 248 个：2 张 31×4 的表）
+  输入要多一样东西：每个词的框（4 个数）。冻结特征里虽然已经编码过位置，这里是显式再给一次。
+  Transformer            n=64:   0.38  n=128:   0.72  n=256:   1.70  n=512:   4.95   (p50, ms)
+  Transformer + 2D 偏置    n=64:   0.52  n=128:   1.22  n=256:   3.01  n=512:   9.76   (p50, ms)</pre></div>
+<div class="chart" id="chart-lat-layout">
+  <p class="chart-title">单线程延迟：加二维偏置的代价</p>
+  <p class="chart-sub">两轴都是对数。</p>
+  <div class="plot"></div>
+</div>
+<p>参数只多 248 个，可延迟几乎翻倍：每次都要算 <var>n</var>² 个坐标差、分桶、查表。输入契约也多了一项：每个词的框。</p>
+
+<h2><span class="sec">§6</span>网格化的张量有多大</h2>
+<div class="out"><div class="out-head"><span>python ch05_layout.py · §4</span><b>FUNSD · 冻结 LiLT</b></div><pre>  FUNSD 测试集图片中位尺寸 754×1000 像素；把 768 维词向量铺满网格，fp32：
+    每 1 像素一格 → 1000×754×768 =   <span class="hl">2316.3 MB / 页</span>
+    每 4 像素一格 → 250×189×768 =    145.2 MB / 页
+    每 8 像素一格 → 125×95×768 =     36.5 MB / 页
+  对照：逐词特征（both 960，fp32）中位文档 177 词 ≈ 0.68 MB</pre></div>
+<p>如果走 BERTgrid 那条路，把词向量铺满整张页面，原始分辨率下一页就是 2.3 GB，每 8 像素一格也还有 36 MB，是逐词特征的 50 多倍。<span class="ev paper">论文</span> Chargrid 先按最小字符的尺寸下采样，再插值到 336×256；BERTgrid 论文没有写自己用的分辨率。如果也用 336×256、768 维，一页 fp32 约 264 MB（这是推算）。不管哪种分辨率，这都不是“轻量 CPU head”的量级。</p>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>图（PICK）、网格（BERTgrid）、二维相对位置（BROS）都是完整系统，要图像、要稠密网格，或者干脆替换 backbone，不能直接挂在冻结 LiLT 后面。</li>
+    <li>最小的版本（给注意力加二维相对位置偏置）在 FUNSD 上没有可测增益：宏 F1 +0.003，学到的偏置（4 个头平均）都在 ±0.07 以内。</li>
+    <li>它的代价是延迟翻倍，而且输入里要多带词框。网格化则是每页几十 MB 到 GB 级的张量。</li>
+    <li>建议放在低优先级。只有当前面几类 head 的错误明显集中在“需要二维关系”的样本上（比如多栏表格）时，再做受控对照。</li>
+  </ol>
+</section>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

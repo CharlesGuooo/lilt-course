@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 章 · 实验台：冻结特征与 FUNSD — 冻结 LiLT 上的 head</title>
+<meta name="description" content="在 FUNSD 上搭受控对照：扁平标签、几何阅读顺序、连续同标签与实例、窗口切分、冻结特征缓存、指标与训练预算。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch01_testbed.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="kicker">第 01 章</div>
+<h1>实验台：冻结特征与 FUNSD</h1>
+<p class="lede">要比较八类 head，前提是条件完全相同：同一份冻结特征、同一份数据切分、同一套标签、同一个训练预算、同一台 CPU。这一章把这些条件逐项定下来。顺带会看到两个后面反复用到的事实：一维的“相邻”和页面上的“相邻”差得很远；连续几个同标签的词，未必属于同一个实例。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch01_testbed.py"><code>code/ch01_testbed.py</code></a></span>
+  <span class="pill">运行 <code>python ch01_testbed.py</code>（第一次会下载 FUNSD 和 LiLT 权重）</span>
+</div>
+
+<h2><span class="sec">§1</span>数据：FUNSD，标签压平</h2>
+<p>FUNSD 是 199 份扫描的英文表单：官方训练集 149 份，测试集 50 份。每个<strong>实体</strong>（一组词）带一个标签：question、answer、header 或 other。我们把实体标签直接压到它的每个词上，不加 <code>B-</code>/<code>I-</code> 前缀，得到的就是目标场景那种“字段名 + Other”的扁平词级标签。question/answer/header 当作三个“字段”，other 当作 Other。</p>
+<p>官方训练集里每隔 5 份取 1 份做 dev，共 30 份，用来早停和选超参。剩下 119 份训练。测试集 50 份只在最后报告结果时用。空文本的词（FUNSD 里有 890 个）直接丢掉。</p>
+<div class="out"><div class="out-head"><span>python ch01_testbed.py · §1</span><b>FUNSD · 冻结 LiLT</b></div><pre>  train 119 份  17,449 个词  5,833 个实体   other 18.4%  question 33.6%  answer 41.6%  header 6.4%
+  dev    30 份   4,439 个词  1,426 个实体   other 9.6%  question 31.4%  answer 50.8%  header 8.2%
+  test   50 份   8,707 个词  2,270 个实体   other 27.4%  question 30.5%  answer 37.8%  header 4.3%
+  dev = 官方训练集里每隔 5 份取 1 份；test = 官方测试集，只用来报告最终结果。</pre></div>
+<p>注意测试集的分布和训练集不一样：other 占 27.4%，训练集只有 18.4%。所以 other 的识别对测试分数影响不小。后面每个 head 都在同一份测试集上比，这个偏差对大家是一样的。</p>
+
+<h2><span class="sec">§2</span>几何阅读顺序：一维 head 眼里的“相邻”</h2>
+<p>FUNSD 的 JSON 按实体列词，同一个实体的词天然挨在一起。真实 OCR 不会这样给。为了不让序列 head 白捡这个便宜，我们按几何位置重排：先按纵向中心分行，行内从左到右。</p>
+<pre class="code"><code>def reading_order(boxes):
+    yc = [(b[1] + b[3]) / 2 for b in boxes]
+    med_h = statistics.median([max(1, b[3] - b[1]) for b in boxes])
+    lines, cur, cur_y = [], [], None
+    for i in sorted(range(len(boxes)), key=lambda i: (yc[i], boxes[i][0])):
+        if cur and abs(yc[i] - cur_y) > 0.5 * med_h:    # 和这一行第一个词差半个词高以上：换行
+            lines.append(cur)
+            cur = []
+        if not cur:
+            cur_y = yc[i]
+        cur.append(i)
+    if cur:
+        lines.append(cur)
+    return [i for line in lines for i in sorted(line, key=lambda i: boxes[i][0])]</code></pre>
+<div class="out"><div class="out-head"><span>python ch01_testbed.py · §2</span><b>FUNSD · 冻结 LiLT</b></div><pre>  文档 82092117，223 个词，前 14 个（按行、行内从左到右）：
+    0  ATT.             other     实体   9   框 (136, 85)-(168,100)
+    1  GEN.             other     实体   9   框 (176, 85)-(212, 99)
+    2  ADMIN.           other     实体   9   框 (220, 84)-(270, 99)
+    3  OFFICE           other     实体   9   框 (274, 84)-(326, 98)
+    4  Fax:             question  实体   4   框 (330, 84)-(363, 98)
+    5  614              answer    实体   7   框 (364, 85)-(391, 99)
+    6  -466             answer    实体   7   框 (392, 84)-(424,101)
+    7  -5087            answer    实体   7   框 (424, 82)-(469,100)
+    8  Dec              other     实体   8   框 (555, 84)-(582, 98)
+    9  10               other     实体   8   框 (588, 85)-(608, 99)
+   10  &#x27;98              other     实体   8   框 (615, 84)-(641, 98)
+   11  17               other     实体   8   框 (661, 85)-(684, 98)
+   12  :46              other     实体   8   框 (683, 84)-(709,101)
+   13  P.               other     实体   8   框 (734, 82)-(761, 97)</pre></div>
+<p>第一行是一张传真的页眉：机构名（other）、<code>Fax:</code>（question）、号码（answer）、日期时间（other）挤在同一行，全都排进了一维序列。下面这张测试表单可以切换着看：</p>
+<div class="widget" id="w-doc">
+  <div class="widget-title">一份 FUNSD 测试表单：标签和阅读顺序</div>
+  <p class="widget-sub">颜色是标签：蓝 question、橙 answer、青 header、灰 other。切到“阅读顺序”看一维 head 怎么串这些词。</p>
+  <div class="controls"><span class="seg-btns"><button type="button" class="on" data-mode="label">标签</button><button type="button" data-mode="order">阅读顺序</button></span></div>
+  <div class="doc-view"></div>
+  <p class="doc-note"></p>
+</div>
+
+<h2><span class="sec">§3</span>连续同标签 ≠ 同一个实例</h2>
+<p>扁平标签只告诉你每个词是什么字段，不告诉你哪几个词属于同一个实例。常见的还原办法是把阅读顺序里连续的同标签词并成一段。FUNSD 保留了实体编号，可以直接核对这种办法错多少：</p>
+<div class="out"><div class="out-head"><span>python ch01_testbed.py · §3</span><b>FUNSD · 冻结 LiLT</b></div><pre>  train 字段实体 5,108 个，连续同标签片段 3,512 个
+        一个片段里混了 ≥2 个实体： 767 个片段（<span class="hl">21.8%</span>）
+        一个实体被拆成 ≥2 个片段： 176 个实体（3.4%）
+        片段长度（词）p50 2 · p90 8 · p99 32 · 最长 120
+  test  字段实体 1,998 个，连续同标签片段 1,241 个
+        一个片段里混了 ≥2 个实体： 251 个片段（<span class="hl">20.2%</span>）
+        一个实体被拆成 ≥2 个片段：  53 个实体（2.7%）
+        片段长度（词）p50 2 · p90 10 · p99 51 · 最长 114
+  前者：两个相邻的同类实例中间没有 other 隔开，扁平 tag 把它们并成一段；
+  后者：多行实体在几何阅读顺序里被别的词隔开。两种情况都说明“连续同标签 ≠ 同一实例”。</pre></div>
+<p>两种错误都有。一是“并错”：约五分之一的片段混进了两个以上的实体。比如表格里一列答案上下相邻，中间没有 other 隔开。二是“拆错”：约 3% 的实体被拆成几段，通常是多行的实体被别的词插在中间。这有两个后果：</p>
+<ul>
+  <li>只用扁平 tag 训练的 head，<strong>没有办法学出实例边界</strong>。要分实例，要么补 B/I 或实例编号的标注，要么写后处理规则。<a href="ch06_span.html">第 6 章</a>会算出这对实体级指标意味着什么上限。</li>
+  <li>本课的主指标用<strong>逐词</strong> F1，不用实体级 exact match，免得把边界问题和分类能力混在一起。</li>
+</ul>
+
+<h2><span class="sec">§4</span>分词与窗口：一次最多 512 个 token</h2>
+<div class="out"><div class="out-head"><span>python ch01_testbed.py · §4</span><b>FUNSD · 冻结 LiLT</b></div><pre>  每份文档 subword 数：中位数 263，最多 952；平均每词 1.80 个 subword
+  超过 510 个 subword、要切成 2 个窗口的文档：5 / 199</pre></div>
+<p>平均每个词切成 1.8 个 subword。199 份里有 5 份超过 510 个 subword。我们把词按顺序切成不重叠的窗口，每个窗口各自前向。代价是窗口边界附近的词看不到另一个窗口的上下文。生产环境可以用带重叠的滑动窗口，再给每个词挑上下文最完整的那一份。不论哪种做法，都要写进输出契约。</p>
+
+<h2><span class="sec">§5</span>冻结 LiLT 抽特征，缓存起来</h2>
+<p>backbone 只跑一遍。每个词取第一个 subword 位置的向量，文本流存最后 4 层，layout 流存最后一层，全部 fp16 落盘。后面所有 head 都在这份缓存上训练和测试。</p>
+<pre class="code"><code>for a, b in windows_by_tokens([len(p) for p in per_word]):     # 每个窗口 ≤ 510 个 subword
+    tok_idx = [t for w in range(a, b) for t in per_word[w]]
+    input_ids = [tok.bos_token_id] + [ids[t] for t in tok_idx] + [tok.eos_token_id]
+    bbox = [[0, 0, 0, 0]] + [list(boxes[wid[t]]) for t in tok_idx] + [[0, 0, 0, 0]]
+    base(input_ids=torch.tensor([input_ids]), bbox=torch.tensor([bbox]), ...)   # hook 取出各层输出
+    pos = 1                                                       # 跳过 &lt;s&gt;
+    for w in range(a, b):
+        text4[w] = torch.stack([taps[("t", i)][0, pos] for i in range(8, 12)]).numpy()
+        layout[w] = taps[("l", 11)][0, pos].numpy()
+        pos += len(per_word[w])                                   # 跳到下一个词的第一个 subword</code></pre>
+<div class="out"><div class="out-head"><span>python ch01_testbed.py · §5</span><b>FUNSD · 冻结 LiLT</b></div><pre>  199 份文档前向合计 33.7 s，每份中位数 147 ms（torch 4 线程，Apple M1）
+  缓存里每个词存了：text4 (4, 768)（文本流第 9-12 层） + layout (192,)（layout 流第 12 层），fp16
+  不同输出契约，一份文档传给 head 的数据量：
+    text     768 维   中位文档 142 词: fp32  0.44 MB · fp16  0.22 MB   最长 433 词: fp32  1.33 MB
+    both     960 维   中位文档 142 词: fp32  0.55 MB · fp16  0.27 MB   最长 433 词: fp32  1.66 MB
+    last4   3264 维   中位文档 142 词: fp32  1.85 MB · fp16  0.93 MB   最长 433 词: fp32  5.65 MB
+  只是张量本身的字节数；序列化、压缩和网络耗时要在真实服务上量。</pre></div>
+<p>这张表就是“输出契约”的传输账。960 维比 768 维只多 25%，last4 是 960 的 3.4 倍。fp16 传输能再减一半。注意这只是张量本身的字节数，序列化、压缩和网络的耗时要在真实服务上量。</p>
+
+<h2><span class="sec">§6</span>指标与训练预算</h2>
+<p>所有 head 用同一套指标。设第 <var>c</var> 类的逐词精确率和召回率是 <var>P<sub>c</sub></var>、<var>R<sub>c</sub></var>：</p>
+<div class="math"><var>F1<sub>c</sub></var> = 2<var>P<sub>c</sub>R<sub>c</sub></var> / (<var>P<sub>c</sub></var> + <var>R<sub>c</sub></var>)　　宏 F1 = (<var>F1</var><sub>question</sub> + <var>F1</var><sub>answer</sub> + <var>F1</var><sub>header</sub>) / 3</div>
+<ul>
+  <li><strong>宏 F1</strong>：三个字段类的平均，other 不算在内。header 词最少，宏平均能让它的好坏被看见。</li>
+  <li><strong>实体全对率</strong>：金标实体里所有词都标对的比例。它<strong>不判断边界</strong>，所以不是 exact-field match。</li>
+  <li><strong>ECE</strong>：置信度准不准（<a href="ch02_linear.html">第 2 章</a>细讲）。按置信度分 10 个等宽区间，算每个区间平均置信度和实际准确率之差，再按词数加权。Guo 等（2017）用的是 15 个区间。</li>
+</ul>
+<p>FUNSD 官方报告的是实体级 F1，LiLT 论文的 0.8841 也是。和这里的逐词宏 F1 不是同一个口径，不能放在一起比。</p>
+<p>训练预算对所有神经网络 head 都一样，没有针对某个 head 单独调参：</p>
+<pre class="code"><code>def train_head(make_head, data, view="both", seed=0, lr=2e-3, wd=0.01, bs=8, max_epochs=60, patience=10):
+    """
+    统一训练预算：AdamW(lr=2e-3, wd=0.01)，每批 8 份文档，最多 60 轮；
+    每轮在 dev 上算宏平均 F1，连续 10 轮不涨就停，取 dev 最好的那一轮。
+    """</code></pre>
+<p>每个 head 用 3 个随机种子（0、1、2）各训练一次，报告均值 ± 标准差。树模型和原型法没有随机性的部分只跑一次。</p>
+
+<h2><span class="sec">§7</span>参照：backbone 一次前向多慢</h2>
+<p>后面每一章都会报 head 的延迟：单线程、batch=1、只算 head，不含特征传输。先量一下 backbone，好知道 head 的毫秒数该和多大的数比：</p>
+<div class="out"><div class="out-head"><span>python ch01_testbed.py · §6</span><b>FUNSD · 冻结 LiLT</b></div><pre>  512 token，1 线程：p50   392.1 ms   p95   405.5 ms
+  512 token，4 线程：p50   302.5 ms   p95   310.8 ms
+  后面每一章的 head 计时都用 1 线程、batch=1，和这里的 1 线程数字对照着看。</pre></div>
+<div class="stats">
+  <div class="stat"><div class="s-label">backbone，512 token，1 线程</div><div class="s-value">392 ms</div><div class="s-note">p50；Apple M1</div></div>
+  <div class="stat"><div class="s-label">backbone，512 token，4 线程</div><div class="s-value">303 ms</div><div class="s-note">架构课第 7 章测的是 291 ms</div></div>
+  <div class="stat"><div class="s-label">FUNSD 一份文档（4 线程）</div><div class="s-value">147 ms</div><div class="s-note">中位数；文档短于 512 token</div></div>
+</div>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>FUNSD 的实体标签压到词上，就得到扁平的“字段 + Other”标签。119 份训练、30 份 dev、50 份测试。</li>
+    <li>按几何位置排阅读顺序，序列 head 才不会白捡“同一实体的词挨在一起”的便宜。</li>
+    <li>连续同标签不等于同一实例：约 21% 的片段混了多个实体，约 3% 的实体被拆开。扁平 tag 本身不带边界。</li>
+    <li>冻结特征只算一次。传 960 维比 768 维多 25%，last4 多 2.4 倍。backbone 单线程一次前向约 392 ms，后面所有 head 的延迟都拿它来比。</li>
+  </ol>
+</section>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -19,6 +19,12 @@
 | 06 输出与任务头 | [html/ch06_heads.html](html/ch06_heads.html) | [code/ch06_heads.py](code/ch06_heads.py) |
 | 07 落地：冻结 backbone | [html/ch07_frozen_backbone.html](html/ch07_frozen_backbone.html) | [code/ch07_frozen_backbone.py](code/ch07_frozen_backbone.py) |
 
+## 续篇：冻结 LiLT 上的轻量 head
+
+[`frozen-heads/`](frozen-heads/) 接着第 7 章讲：LiLT 冻结成共享 backbone 以后，每个任务的 head 选什么结构。课程把八类候选（线性 / MLP、一维卷积、BiLSTM、小 Transformer、CRF 解码、版面感知、biaffine 片段、树模型、原型与相似度）放到 FUNSD 上，用同一份冻结特征、同一份切分、同一台 CPU 比准确率、置信度、文件大小和延迟。
+
+**在线阅读**：https://charlesguooo.github.io/lilt-course/frozen-heads/
+
 ## 本地阅读
 
 克隆后用浏览器直接打开 `html/index.html`。不需要联网，不依赖任何 CDN。

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 0 章 · 问题与证据规则 — 冻结 LiLT 上的 head</title>
+<meta name="description" content="冻结的 LiLT 作为共享 backbone 时，各任务的抽取 head 怎么选：问题、输出契约、八类候选和证据规则。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch00_problem.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="kicker">第 00 章</div>
+<h1>问题与证据规则</h1>
+<p class="lede">这门课接着 <a href="../../html/ch07_frozen_backbone.html">LiLT 架构课第 7 章</a>往下讲。LiLT 冻结以后，所有任务共用它算出的特征，每个任务只训练自己的 head。这个 head 用什么结构，是本课要回答的问题。动手之前，先讲清楚两件事：问题的边界在哪里，什么样的数字才算回答了它。</p>
+<div class="meta-row">
+  <span class="pill">本章没有配套脚本</span>
+  <span class="pill">实验从 <a href="ch01_testbed.html">第 1 章</a>开始</span>
+</div>
+
+<h2><span class="sec">§1</span>要解决的问题</h2>
+<ul>
+  <li><strong>输入</strong>：OCR 给出每个词的文字和位置框。</li>
+  <li><strong>输出</strong>：每个词属于哪个字段，比如姓名、日期、金额。不属于任何目标字段的词归为 <span class="lab">Other</span>。标签是<strong>扁平</strong>的，只有字段名，没有 <code>B-</code> / <code>I-</code> 前缀。每个词还要附带一个模型置信度。</li>
+  <li><strong>任务很多</strong>：不同文档类型、不同业务方要抽的字段集合不同。设想有几十个这样的任务组合（架构课第 7 章用 60 个举例）。一个任务可以同时抽好几个字段。任务数也不等于要部署的服务数。</li>
+  <li><strong>在 CPU 上推理</strong>：单份文档的延迟、常驻内存、所有任务的模型文件总量都要算进成本。</li>
+</ul>
+
+<figure class="diagram">
+<svg viewBox="0 0 760 300" role="img" aria-label="两种方案：每个任务在 backbone 里插 LoRA，或者冻结 backbone 共享一次前向">
+  <defs><marker id="a0" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-ah"/></marker></defs>
+  <text x="180" y="22" text-anchor="middle" class="d-text" font-size="14" font-weight="600">旧：每个任务在 backbone 里插 LoRA</text>
+  <text x="560" y="22" text-anchor="middle" class="d-text" font-size="14" font-weight="600">新：冻结 LiLT，共享一次前向</text>
+  <g>
+    <rect x="20" y="50" width="96" height="44" rx="8" class="d-box"/><text x="68" y="77" text-anchor="middle" class="d-text" font-size="12.5">词 + 框</text>
+    <rect x="20" y="170" width="96" height="44" rx="8" class="d-box"/><text x="68" y="197" text-anchor="middle" class="d-text" font-size="12.5">词 + 框</text>
+    <path d="M116,72 H140" class="d-arrow" marker-end="url(#a0)"/>
+    <path d="M116,192 H140" class="d-arrow" marker-end="url(#a0)"/>
+    <rect x="142" y="44" width="122" height="56" rx="8" class="d-t"/><text x="203" y="68" text-anchor="middle" class="d-text" font-size="12.5">LiLT</text><text x="203" y="86" text-anchor="middle" class="d-mono" font-size="11">+ 任务 1 的 LoRA</text>
+    <rect x="142" y="164" width="122" height="56" rx="8" class="d-t"/><text x="203" y="188" text-anchor="middle" class="d-text" font-size="12.5">LiLT</text><text x="203" y="206" text-anchor="middle" class="d-mono" font-size="11">+ 任务 2 的 LoRA</text>
+    <path d="M264,72 H288" class="d-arrow" marker-end="url(#a0)"/>
+    <path d="M264,192 H288" class="d-arrow" marker-end="url(#a0)"/>
+    <rect x="290" y="52" width="62" height="40" rx="7" class="d-box"/><text x="321" y="77" text-anchor="middle" class="d-text" font-size="12">head 1</text>
+    <rect x="290" y="172" width="62" height="40" rx="7" class="d-box"/><text x="321" y="197" text-anchor="middle" class="d-text" font-size="12">head 2</text>
+    <text x="186" y="128" text-anchor="middle" class="d-muted" font-size="12">两个任务的特征不同</text>
+    <text x="186" y="146" text-anchor="middle" class="d-muted" font-size="12">→ 每个任务各跑一次前向</text>
+    <text x="186" y="260" text-anchor="middle" class="d-muted" font-size="12">任务数 T 个 → T 次 backbone 前向</text>
+  </g>
+  <line x1="380" y1="40" x2="380" y2="280" class="d-dash"/>
+  <g>
+    <rect x="400" y="110" width="80" height="44" rx="8" class="d-box"/><text x="440" y="137" text-anchor="middle" class="d-text" font-size="12.5">词 + 框</text>
+    <path d="M480,132 H500" class="d-arrow" marker-end="url(#a0)"/>
+    <rect x="502" y="96" width="92" height="72" rx="8" class="d-t"/><text x="548" y="126" text-anchor="middle" class="d-text" font-size="12.5">LiLT</text><text x="548" y="145" text-anchor="middle" class="d-mono" font-size="11">冻结</text>
+    <g class="d-arrow">
+      <path d="M594,132 C614,132 614,64 634,64" marker-end="url(#a0)"/>
+      <path d="M594,132 C614,132 614,114 634,114" marker-end="url(#a0)"/>
+      <path d="M594,132 C614,132 614,200 634,200" marker-end="url(#a0)"/>
+    </g>
+    <rect x="636" y="44" width="104" height="40" rx="7" class="d-box"/><text x="688" y="69" text-anchor="middle" class="d-text" font-size="12">head 1</text>
+    <rect x="636" y="94" width="104" height="40" rx="7" class="d-box"/><text x="688" y="119" text-anchor="middle" class="d-text" font-size="12">head 2</text>
+    <text x="688" y="160" text-anchor="middle" class="d-muted" font-size="13">⋮</text>
+    <rect x="636" y="180" width="104" height="40" rx="7" class="d-box"/><text x="688" y="205" text-anchor="middle" class="d-text" font-size="12">head T</text>
+    <text x="560" y="260" text-anchor="middle" class="d-muted" font-size="12">1 次 backbone 前向，T 个 head 共享同一份特征</text>
+  </g>
+</svg>
+<figcaption>左：LoRA 改的是 backbone 内部的计算，同一份文档经过不同任务的 LoRA，得到的特征不一样。右：backbone 冻结，特征只算一次，换任务只换 head。</figcaption>
+</figure>
+<div class="callout warn">
+  <span class="ct">两件事别混在一起</span>
+  <p>LoRA 是低秩增量，参数通常远少于 backbone，不能不量就说它“大”。换方案的理由主要是另一点：加了 LoRA 的特征只属于那一个任务，别的任务没法复用同一次前向。另外，“backbone 和 head 拆成两段”是设计上的分层，不等于一定要部署两个、或者 T+1 个服务。</p>
+</div>
+
+<h2><span class="sec">§2</span>输出契约：backbone 和 head 之间传什么</h2>
+<p>head 能用什么结构，取决于 backbone 服务吐出什么。下面几项一旦定下来，所有任务的 head 都按它训练；以后要改，所有 head 都得重训。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>选项</th><th>本课怎么做</th></tr></thead>
+  <tbody>
+    <tr><td>哪条流、哪几层</td><td>文本流最后一层 768（HF 默认）· 再拼 layout 流 192 = 960（官方任务头）· 最后 4 层 3264</td><td>默认 960；<a href="ch02_linear.html">第 2 章</a>比较这四种</td></tr>
+    <tr><td>粒度</td><td>subword 级，还是词级</td><td>每个词取第一个 subword 的向量，head 看到的是词序列</td></tr>
+    <tr><td>掩码与词映射</td><td>哪些位置是真实的词、subword 属于哪个词</td><td>必须随特征一起给</td></tr>
+    <tr><td>长文档</td><td>LiLT 一次最多 512 个 token</td><td>按 token 数切成不重叠的窗口（<a href="ch01_testbed.html">第 1 章</a>）</td></tr>
+    <tr><td>词框</td><td>只有显式用版面的 head 要</td><td><a href="ch05_layout.html">第 5 章</a>的版面 head 用</td></tr>
+    <tr><td>输出</td><td>每个词的预测 + 模型置信度</td><td>置信度怎么定义随 head 而变（softmax、CRF 边际、片段分数、投票比例）</td></tr>
+  </tbody>
+</table></div>
+<div class="callout key">
+  <span class="ct">模型置信度不是 OCR 置信度</span>
+  <p>OCR 表里常有一列 <code>conf</code>，那是识别字符的把握。head 输出的是“这个词属于这个字段”的把握。两者含义不同，不能互相顶替，也不能直接相乘当成总置信度。最后交给下游的列名要单独约定，比如 <code>predict</code> 加 <code>prob</code>。</p>
+</div>
+
+<h2><span class="sec">§3</span>八类候选 head</h2>
+<p>选这八类是为了覆盖不同的结构假设，不是因为预先认定它们会赢。每一类都带着一个要回答的问题：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>候选</th><th>结构直觉</th><th>要回答的问题</th><th>章</th></tr></thead>
+  <tbody>
+    <tr><td>逐词线性层 / 小 MLP</td><td>每个词单独分类</td><td>冻结特征本身能把字段分开多少？</td><td><a href="ch02_linear.html">02</a></td></tr>
+    <tr><td>一维卷积</td><td>沿阅读顺序看左右几个词</td><td>一维的“相邻”够不够用？</td><td><a href="ch03_sequence.html">03</a></td></tr>
+    <tr><td>BiLSTM</td><td>沿阅读顺序双向走一遍</td><td>LiLT 已经有全局注意力，再加序列建模还有增益吗？</td><td><a href="ch03_sequence.html">03</a></td></tr>
+    <tr><td>小型 Transformer</td><td>在冻结特征上再叠一两层注意力</td><td>重复同一种计算能补出新信息吗？长度变长时 CPU 扛得住吗？</td><td><a href="ch03_sequence.html">03</a></td></tr>
+    <tr><td>（CRF 解码）</td><td>给逐词分数加上标签转移</td><td>CRF 是可组合的解码变量，不是独立候选：加不加，差多少？</td><td><a href="ch04_crf.html">04</a></td></tr>
+    <tr><td>版面感知 head</td><td>图、二维相对位置、二维网格</td><td>要多传哪些输入？显式二维关系还有增益吗？</td><td><a href="ch05_layout.html">05</a></td></tr>
+    <tr><td>片段 / 指针 / biaffine</td><td>预测“哪一段是字段”而不是逐词</td><td>扁平 tag 能不能构造出片段目标？重复实例怎么办？</td><td><a href="ch06_span.html">06</a></td></tr>
+    <tr><td>树模型</td><td>每个词当一行表格数据</td><td>高维稠密向量上，树的效果、体积、延迟如何？</td><td><a href="ch07_tree.html">07</a></td></tr>
+    <tr><td>原型 / 相似度</td><td>和示例或类别原型比相似度</td><td>能不能不训练就加新字段？冻结后还灵吗？</td><td><a href="ch08_prototype.html">08</a></td></tr>
+  </tbody>
+</table></div>
+
+<h2><span class="sec">§4</span>证据规则：什么样的数字能回答这个问题</h2>
+<p>文献里关于这些 head 的数字不少，但大多回答的不是我们的问题。按和目标设置的距离，从近到远排：</p>
+<ol>
+  <li><strong>同设置的直接证据</strong>：冻结 LiLT，用同一份数据切分、同一套扁平标签，在同一类 CPU 上测。<span class="ev paper">文献</span> 2026-11 检索时一条也没找到，包括在 FUNSD、CORD、SROIE 上给冻结的 LayoutLM 系列、LiLT、BROS 接线性或小 probe 的工作。检索没命中，不等于一定不存在。</li>
+  <li><strong>其他冻结编码器的证据</strong>：<span class="ev paper">论文</span> BERT 论文 §5.3：冻结 BERT-base，拼接最后 4 层，接两层 768 维 BiLSTM，CoNLL-2003 dev F1 96.1；整体微调是 96.4。Peters 等（2019）：冻结 BERT-base，对各层加权求和后接两层 BiLSTM，CoNLL-2003 test F1 92.2；微调是 92.4。这两条都是纯文本的新闻 NER，而且用的 head 不轻。</li>
+  <li><strong>端到端微调的结果</strong>：<span class="ev paper">论文</span> LiLT 在 FUNSD 上的 F1 0.8841，是整个模型一起微调、用 BIO 标签、按实体级算出来的。官方训练脚本里也找不到任何冻结逻辑。这个数不能拿来当冻结 head 的基线，也推不出两种设置差多少。</li>
+  <li><strong>只靠结构推断</strong>：<span class="ev infer">推断</span> 复杂度公式、参数量、“LiLT 已经有全局注意力，再加一层可能冗余”这类论证。它们能说明可能怎样，说明不了实际会怎样。</li>
+</ol>
+<p>本课补上的是第 1 级风格的实测：<span class="ev ours">本课实测</span> 用同一个冻结的 LiLT checkpoint、同一份切分、同一套扁平标签、同一台 CPU，把八类 head 放进同一张表。它回答的是<strong>在 FUNSD 上</strong>的问题，换成你自己的文档，结论要重新量。</p>
+
+<h2><span class="sec">§5</span>FUNSD 实验和目标场景：哪里一样，哪里不一样</h2>
+<div class="two-col">
+  <div class="callout key"><span class="ct">一样的</span>
+    <ul style="margin:0">
+      <li>冻结的 <code>SCUT-DLVCLab/lilt-roberta-en-base</code>，一个参数都不更新</li>
+      <li>词级扁平标签加 other，没有 BIO</li>
+      <li>词框来自标注，按几何位置排出类似 OCR 的阅读顺序</li>
+      <li>CPU 推理，单线程、batch=1 计时</li>
+    </ul></div>
+  <div class="callout warn"><span class="ct">不一样的</span>
+    <ul style="margin:0">
+      <li>FUNSD 是 199 份英文扫描表单，只有一个任务</li>
+      <li>标签是 question / answer / header 这类语义角色，不是业务字段</li>
+      <li>训练集 119 份，比真实任务可能少得多，也可能多</li>
+      <li>CPU 是 Apple M1，不是目标机型；不含序列化和网络</li>
+    </ul></div>
+</div>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>问题：冻结 LiLT 作为共享 backbone 时，每个任务的 head 选什么结构，才能在准确率、CPU 成本和多任务维护之间取得平衡。</li>
+    <li>先定输出契约（哪几层、粒度、掩码、长文档、词框），head 的可选范围由它决定。</li>
+    <li>文献里没有同设置的直接证据。论文数字只能代表它们自己的设置，不能当本项目的预测。</li>
+    <li>本课在 FUNSD 上做受控对照，并给出每种 head 的大小和延迟。它是第一手数据，但只代表 FUNSD。</li>
+  </ol>
+</section>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 6 章 · 片段与 biaffine — 冻结 LiLT 上的 head</title>
+<meta name="description" content="从扁平 tag 派生片段目标、biaffine 片段打分、类别不平衡、片段级 exact match 与扁平 tag 的实体级上限；关系解析为什么不是逐词抽取。">
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('lilt-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+</head>
+<body data-page="ch06_span.html">
+<div class="shell">
+<aside class="sidebar" id="sidebar"></aside>
+<main class="main">
+<article class="content">
+<div class="kicker">第 06 章</div>
+<h1>片段与 biaffine</h1>
+<p class="lede">前面的 head 都是逐词分类。片段 head 换了预测对象：直接预测“从第 <var>i</var> 个词到第 <var>j</var> 个词是一个某字段”。这正好对着第 1 章那个问题：扁平 tag 不带实例边界。片段 head 能不能补上？先要看清楚，它的训练目标从哪里来。</p>
+<div class="meta-row">
+  <span class="pill">对应脚本 <a href="../code/ch06_span.py"><code>code/ch06_span.py</code></a></span>
+  <span class="pill">head 定义 <a href="../code/heads.py"><code>BiaffineSpanHead</code></a></span>
+</div>
+
+<h2><span class="sec">§1</span>训练目标从哪来：扁平 tag → 片段</h2>
+<p>我们手里只有逐词的扁平 tag，能派生出的片段只有一种：阅读顺序里连续的同标签词并成一段。第 1 章算过，这种派生约有 21% 的片段混了多个实体，约 3% 的实体被拆开。片段 head 学的就是这些派生片段，所以它学不到派生规则本身丢掉的边界。</p>
+<div class="widget" id="w-runs">
+  <div class="widget-title">一份表单的阅读顺序：派生片段和真实实例</div>
+  <p class="widget-sub">每个框是一个派生片段（连续同标签），颜色是标签。红色虚线框里混了多个金标实体。切到“显示实体边界”，看扁平 tag 丢掉的那条信息。</p>
+  <div class="controls"><span class="seg-btns"><button type="button" data-mode="run">只看派生片段</button><button type="button" class="on" data-mode="ent">显示实体边界</button></span></div>
+  <div class="run-strip"></div>
+  <p class="doc-note"></p>
+</div>
+<div class="out"><div class="out-head"><span>python ch06_span.py · §1</span><b>FUNSD · 冻结 LiLT</b></div><pre>  最长 32 词 · train 字段词 14,244 个，落在更长片段里的 1,759 个（12.3%）
+  最长 32 词 · test  字段词  6,322 个，落在更长片段里的 1,659 个（26.2%）
+  最长 64 词 · train 字段词 14,244 个，落在更长片段里的   632 个（4.4%）
+  最长 64 词 · test  字段词  6,322 个，落在更长片段里的   785 个（12.4%）
+  训练集：最长 32 词时候选片段 499,344 个，真片段 3,512 个，正样本只占 0.7%</pre></div>
+<p>两个数字决定了这个 head 难训：一是正样本只占 0.7%，每 140 个候选片段里才有 1 个真片段；二是片段可以很长。最长取 32 个词时，测试集有 26% 的字段词落在更长的片段里（多行的大段 answer），这些词没法用一个片段表示。放宽到 64 个词，还剩 12%。</p>
+
+<h2><span class="sec">§2</span>biaffine 片段打分</h2>
+<p><span class="ev paper">论文</span> Yu、Bohnet 和 Poesio（2020）把 NER 当成依存解析来做：每个词过两个前馈网络，分别得到“作起点”和“作终点”的表示，再用一个 biaffine 张量给每个 (起点, 终点) 打一组类别分数。0 类表示“不是片段”。</p>
+<div class="math"><var>h</var><sub>s</sub>(<var>i</var>) = FFNN<sub>s</sub>(<var>x<sub>i</sub></var>)　<var>h</var><sub>e</sub>(<var>j</var>) = FFNN<sub>e</sub>(<var>x<sub>j</sub></var>)　score(<var>i</var>, <var>j</var>, <var>c</var>) = [<var>h</var><sub>s</sub>(<var>i</var>); 1]<sup>⊤</sup> <var>U<sub>c</sub></var> [<var>h</var><sub>e</sub>(<var>j</var>); 1]</div>
+<pre class="code"><code>hs = torch.cat([self.fs(x), one], -1)                        # [B, n, h+1]
+he = torch.cat([self.fe(x), one], -1)
+he_win = F.pad(he, (0, 0, 0, self.L - 1)).unfold(1, self.L, 1).permute(0, 1, 3, 2)  # 每个起点往后 L 个终点
+s = torch.einsum("bni,kij,bnlj->bnlk", hs, self.U, he_win)   # [B, n, L, K]：每个候选片段 K 类分数</code></pre>
+<p>解码沿用论文里 flat NER 的规则：所有“最可能的类不是 0”的候选，按概率从高到低取，和已取的片段重叠就跳过。没被任何片段覆盖的词算 other。每个词的置信度也要另外定一条规则。我们的做法是：片段里的词共享片段的概率；没被覆盖的词，用“以它为起点和终点的单词片段”不是片段的概率。这条规则是我们定的，不是论文给的。</p>
+
+<h2><span class="sec">§3</span>直接照搬，先吃一个大亏</h2>
+<div class="out"><div class="out-head"><span>python ch06_span.py · §2</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear（基线）                 宏F1 0.679±0.005  Q 0.731  A 0.748  H 0.558  实体全对 0.712  ECE 0.011
+  biaffine · w=1 L=32        宏F1 0.328±0.024  Q 0.297  A 0.265  H 0.422  实体全对 0.229  ECE 0.561</pre></div>
+<p>照搬论文的设置，所有候选在损失里一视同仁，宏 F1 只有 0.328，ECE 0.561。原因是极度不平衡：模型几乎把所有候选都判成“不是片段”。召回很低，没被覆盖的词全算成 other，而且“不是片段”的概率接近 1，所以错得很自信。论文在通用 NER 上没有碰到这个问题，但它的编码器、数据量和标签都和这里不同。</p>
+
+<h2><span class="sec">§4</span>在 dev 上选负样本权重和最长片段</h2>
+<div class="out"><div class="out-head"><span>python ch06_span.py · §3</span><b>FUNSD · 冻结 LiLT</b></div><pre>  L=32  w=1.0    dev 宏F1 0.378  （第 47 轮最好）
+  L=32  w=0.3    dev 宏F1 0.517  （第 31 轮最好）
+  L=32  w=0.1    dev 宏F1 0.610  （第 16 轮最好）
+  L=32  w=0.03   dev 宏F1 0.624  （第 16 轮最好）
+  L=64  w=1.0    dev 宏F1 0.378  （第 59 轮最好）
+  L=64  w=0.3    dev 宏F1 0.481  （第 17 轮最好）
+  L=64  w=0.1    dev 宏F1 0.593  （第 22 轮最好）
+  L=64  w=0.03   dev 宏F1 0.628  （第 9 轮最好）
+  dev 上最好：L=64, w=0.03
+  linear（基线）                 宏F1 0.679±0.005  Q 0.731  A 0.748  H 0.558  实体全对 0.712  ECE 0.011
+  biaffine · w=1 L=32        宏F1 0.328±0.024  Q 0.297  A 0.265  H 0.422  实体全对 0.229  ECE 0.561
+  biaffine · w=0.03 L=64     宏F1 0.580±0.016  Q 0.611  A 0.621  H 0.509  实体全对 0.613  ECE 0.326
+  训练轮数：[9, 17, 16]，每个种子训练 20 s</pre></div>
+<div class="chart" id="chart-spancmp">
+  <p class="chart-title">逐词宏 F1：片段 head（dev 上选过参数）vs 线性、线性 + CRF</p>
+  <p class="chart-sub">误差线是 3 个种子的标准差。横轴从 0.6 开始。</p>
+  <div class="plot"></div>
+</div>
+<p>把负样本的损失权重降到 0.03、最长片段放宽到 64 个词，宏 F1 回到 0.580。这仍比线性低 10 个点，ECE 0.326 也是所有 head 里最差之一。dev 上的趋势是权重越低越好，但已经在变平，再往下试可能还能涨一点。注意，这一步给了片段 head 一个别的 head 没有的调参机会（类别权重），比较时要记住。一个 head 需要单独调参才勉强能用，这本身也说明它离开箱即用还远。</p>
+
+<h2><span class="sec">§5</span>片段级 exact match，以及扁平 tag 的上限</h2>
+<div class="out"><div class="out-head"><span>python ch06_span.py · §4</span><b>FUNSD · 冻结 LiLT</b></div><pre>  biaffine 片段              对派生片段 P 0.361 R 0.484 F1 0.414   对金标实体 P 0.477 R 0.397 F1 0.433
+  linear → 连续同标签合并         对派生片段 P 0.305 R 0.527 F1 0.386   对金标实体 P 0.288 R 0.309 F1 0.298
+  <span class="hl">金标扁平 tag → 片段（上限）</span>        对派生片段 P 1.000 R 1.000 F1 1.000   对金标实体 P 0.749 R 0.465 F1 0.574
+  金标实体 1998 个，派生片段 1241 个。最后一行：标签全对，实体级 F1 也只有这么多——
+  扁平 tag 本身不带实例边界，这个上限对所有只学扁平 tag 的 head 都成立。</pre></div>
+<div class="chart" id="chart-span">
+  <p class="chart-title">片段级 F1：对派生片段 vs 对金标实体</p>
+  <p class="chart-sub">测试集，种子 2。最下面两条是“标签全对”时的上限。</p>
+  <div class="plot"></div>
+</div>
+<p>最后一行是这一章最重要的数字：<span class="ev ours">本课实测</span> 即使把金标扁平标签原样拿来派生片段，对金标实体的 F1 也只有 0.574。召回只有 0.465，因为一个派生片段吞掉多个实体时，这些实体一个都对不上；精确率 0.749，因为被拆开的实体碎片也对不上。这个上限对<strong>所有只学扁平 tag 的 head</strong> 都成立，包括线性、BiLSTM、CRF。逐词标得再准，“连续同标签合并”这条还原规则本身就封了顶。</p>
+<p>片段 head 的逐词宏 F1 低得多，实体级 F1 却是 0.433，比线性 head 合并后的 0.298 高。它的片段更“整”，精确率 0.477 对 0.288。如果下游要的是完整的字段值，这个指标比逐词 F1 更要紧。但想越过 0.574 这条线，换 head 没用，只能补监督：B/I 前缀，或者实例编号。</p>
+
+<h2><span class="sec">§6</span>成本</h2>
+<div class="out"><div class="out-head"><span>python ch06_span.py · §5</span><b>FUNSD · 冻结 LiLT</b></div><pre>  参数 379,504   文件 1485.3 KB   每个词作起点最多 64 个候选
+  biaffine 片段            n=64:   3.13  n=128:   8.82  n=256:  19.69  n=512:  44.57   (p50, ms)
+  linear                 n=64:   0.02  n=128:   0.03  n=256:   0.05  n=512:   0.08   (p50, ms)
+  n=64：候选片段 2,080 个，每个都要算 4 类分数
+  n=512：候选片段 30,752 个，每个都要算 4 类分数</pre></div>
+<div class="chart" id="chart-lat-span">
+  <p class="chart-title">单线程延迟：片段 head vs 线性 head</p>
+  <p class="chart-sub">两轴都是对数。片段 head 的计时包含贪心解码。</p>
+  <div class="plot"></div>
+</div>
+<p>片段 head 是所有 head 里最慢的：256 个词 19.7 ms，512 个词 44.6 ms，约为 backbone 单线程时间的 11%。候选片段数是 <var>n</var>×<var>L</var> 量级，解码还有一个 Python 循环。参数 38 万，文件 1.5 MB。</p>
+
+<h2><span class="sec">§7</span>关系解析不是逐词抽取</h2>
+<p>同一族里还有两类常被一起提的方法，它们回答的是另一个问题：</p>
+<ul>
+  <li><strong>SPADE</strong>（Hwang 等）：把文档抽取建模成词与词之间的有向图，既做字段分类，也做跨字段分组。它要的是显式的关系标注（哪些词连成一个字段、哪些字段归为一组），这些没法从逐词 tag 自动构造。编码器也是自建、端到端训练的。</li>
+  <li><strong>SERA</strong>：实体关系抽取，前提是实体和实体标签<strong>已经知道</strong>，它做的是逐词标注之后的下一步。</li>
+</ul>
+<p>两者都不能拿来替代“从冻结特征做逐词字段标注”。只有业务明确需要 key-value 配对、行项目分组这类结构时，才值得作为单独的子项目评估。</p>
+
+<section class="takeaways">
+  <h2>要点</h2>
+  <ol>
+    <li>扁平 tag 只能派生出“连续同标签”的片段。训练集里正样本只占 0.7%，测试集里 12% ~ 26% 的字段词落在超长片段里。</li>
+    <li>照搬论文设置，宏 F1 只有 0.328；在 dev 上调负样本权重后到 0.580，仍比线性低 10 个点，置信度也很差。延迟是所有 head 里最高的。</li>
+    <li>实体级 exact match 上它反而更好（0.433，线性合并后是 0.298）。但所有只学扁平 tag 的 head 都被 0.574 的上限封住，要越过去只能补实例边界的标注。</li>
+    <li>关系解析（SPADE、SERA）要的是关系标注，回答的是另一个问题，替代不了逐词抽取。</li>
+  </ol>
+</section>
+<nav class="pager" id="pager" aria-label="翻页"></nav>
+</article>
+</main>
+</div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

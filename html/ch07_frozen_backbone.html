@@ -135,6 +135,11 @@ for step in range(200):
 </table></div>
 <p>按 token 存最灵活（以后能换 pooling），按词存更小（词数 W 比 token 数少，示例发票是 32 个词对 66 个 token）。存了缓存，新增一个任务时只需要在缓存上训练新 head，不用再跑 backbone。代价是：输出契约（§1 的三个旋钮）一旦改了，缓存全部作废。</p>
 
+<div class="callout key">
+  <span class="ct">下一步</span>
+  <p>线性 head 只是最简单的一种。续篇 <a href="../frozen-heads/html/index.html">《冻结 LiLT 上的轻量 head》</a>把 BiLSTM、CRF、版面 head、片段 head、树模型、原型法等八类 head 放到 FUNSD 上，用同一份冻结特征比准确率、置信度、文件大小和 CPU 延迟。</p>
+</div>
+
 <section class="takeaways">
   <h2>要点</h2>
   <ol>
