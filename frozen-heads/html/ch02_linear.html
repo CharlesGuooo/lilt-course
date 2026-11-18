@@ -98,7 +98,7 @@
   header            39        84        56       195</pre></div>
 <div id="cm-linear"></div>
 <p style="font-size:13.5px;color:var(--muted)">每行按真值归一化：对角线是召回率，其余是被错标成哪一类。</p>
-<p>最大的两块错误都在 other 和 answer 之间：533 个 other 被标成 answer，496 个 answer 被标成 other。其次是 question 被当成 other。一个 answer 长什么样，很大程度上取决于它旁边是不是一个 question。每个词单独分类时，这份上下文只能靠 LiLT 特征里已经带的那部分。<a href="ch03_sequence.html">第 3 章</a>就测“在 head 里再看一眼邻居”能补回多少。</p>
+<p>最大的两块错误都在 other 和 answer 之间：533 个 other 被标成 answer，496 个 answer 被标成 other。再往下是 question 被标成 answer（365 个）或 other（339 个）。一个 answer 长什么样，很大程度上取决于它旁边是不是一个 question。每个词单独分类时，这份上下文只能靠 LiLT 特征里已经带的那部分。<a href="ch03_sequence.html">第 3 章</a>就测“在 head 里再看一眼邻居”能补回多少。</p>
 
 <h2><span class="sec">§5</span>成本</h2>
 <div class="out"><div class="out-head"><span>python ch02_linear_mlp.py · §5</span><b>FUNSD · 冻结 LiLT</b></div><pre>  linear · text 768      参数     3,076   文件     13.8 KB
@@ -109,7 +109,7 @@
   linear · both 960      n=64:   0.02  n=128:   0.03  n=256:   0.04  n=512:   0.07   (p50, ms)
   linear · last4 3264    n=64:   0.04  n=128:   0.06  n=256:   0.11  n=512:   0.25   (p50, ms)
   MLP · both             n=64:   0.09  n=128:   0.14  n=256:   0.25  n=512:   0.46   (p50, ms)</pre></div>
-<p>线性 head 是 16.8 KB 的文件，一份 256 词的文档 0.04 ms。backbone 单线程一次前向要 392 ms，head 连它的万分之一都不到。即便是 MLP，0.25 ms 也微不足道。这一档 head 的延迟可以不算，要算的是准确率和置信度。</p>
+<p>线性 head 是 16.8 KB 的文件，一份 256 词的文档 0.04 ms。backbone 单线程一次前向要 392 ms，head 大约是它的万分之一。即便是 MLP，0.25 ms 也微不足道。这一档 head 的延迟可以不算，要算的是准确率和置信度。</p>
 
 <section class="takeaways">
   <h2>要点</h2>

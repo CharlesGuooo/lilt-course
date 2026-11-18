@@ -122,7 +122,7 @@
   <p class="chart-sub">batch=1，只算 head；虚线是线性 head。悬停看具体毫秒数。</p>
   <div class="plot"></div>
 </div>
-<p>n 涨 8 倍时，Transformer 的延迟涨了 13 倍，平方项开始显形；BiLSTM 涨 7.7 倍，接近线性，可它的绝对值最大：256 个词要 6.2 ms，因为每一步都得等上一步。卷积介于两者之间。三者都比线性 head 慢 30 ~ 150 倍。不过放到整条链路里看，backbone 单线程一次前向是 392 ms，最慢的 BiLSTM 也不到它的 2%。</p>
+<p>n 涨 8 倍时，Transformer 的延迟涨了 13 倍，平方项开始显形；BiLSTM 涨 7.7 倍，接近线性，可它的绝对值最大：256 个词要 6.2 ms，因为每一步都得等上一步。卷积介于两者之间。三者都比线性 head 慢几十到一百多倍。不过放到整条链路里看，backbone 单线程一次前向是 392 ms，最慢的 BiLSTM 也不到它的 2%。</p>
 <p>真正可能变成问题的是两件事：</p>
 <ul>
   <li><strong>文件大小</strong>：每个任务 3 ~ 4.4 MB，是线性 head 的约 200 倍。60 个任务就是两三百 MB（<a href="ch09_compare.html">第 9 章</a>算总账）。</li>
